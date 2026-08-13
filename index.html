@@ -1,0 +1,817 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Colorado P&C Risk — Exposure Explorer</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script src="counties.js"></script>
+<script src="counties_geo.js"></script>
+<style>
+  :root{
+    --panel:#ffffff; --ink:#14181f; --muted:#5b6472; --line:#e3e9f2; --accent:#0957c3;
+    --font:"Helvetica Neue",Arial,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:var(--font);color:var(--ink)}
+  #map{position:absolute;inset:0}
+  .topbar{position:absolute;top:0;left:0;right:0;z-index:5;display:flex;gap:16px;align-items:center;
+    padding:10px 14px;background:rgba(255,255,255,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(4px);flex-wrap:wrap}
+  .topbar h1{font-size:15px;margin:0;font-weight:800;letter-spacing:-.01em}
+  .topbar .sub{font-size:11.5px;color:var(--muted)}
+  .chip{font-size:10.5px;font-weight:700;color:#8a5a00;background:#fff4de;border:1px solid #f1d79b;border-radius:999px;padding:3px 8px}
+  .perils{display:flex;gap:4px;background:#eef2f8;border-radius:9px;padding:3px;margin-left:auto;flex-wrap:wrap}
+  .perils label{font-size:12.5px;font-weight:600;color:var(--muted);padding:5px 11px;border-radius:7px;cursor:pointer;user-select:none}
+  .perils input{display:none}
+  .perils input:checked + span{}
+  .perils label.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+  .zoom{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .submode{gap:3px;background:#eef2f8;border-radius:9px;padding:3px}
+  .submode button{font-family:inherit;font-size:11px;font-weight:600;color:var(--muted);background:transparent;border:0;padding:5px 9px;border-radius:7px;cursor:pointer}
+  .submode button.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+
+  .panel{position:absolute;left:12px;top:64px;z-index:5;width:290px;max-height:calc(100vh - 88px);overflow:auto;
+    background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:12px;padding:13px 15px;box-shadow:0 6px 20px rgba(20,40,80,.10);font-size:12px}
+  .panel h2{font-size:12px;margin:0 0 8px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .legend-row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .legend-row.filterable{cursor:pointer;border-radius:5px;margin:5px -6px;padding:2px 6px}
+  .legend-row.filterable:hover{background:rgba(0,0,0,.05)}
+  .legend-row.off{opacity:.4;text-decoration:line-through}
+  .pantally{position:absolute;top:70px;left:50%;transform:translateX(-50%);z-index:6;display:none;
+    background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:999px;padding:6px 15px;
+    font-size:11.5px;color:var(--ink);box-shadow:0 6px 20px rgba(20,40,80,.14);
+    white-space:nowrap;max-width:calc(100vw - 360px);overflow:hidden;text-overflow:ellipsis}
+  .pantally.show{display:block}
+  .pantally b{font-variant-numeric:tabular-nums}
+  .pantally .pt-sw{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 4px 0 12px;vertical-align:middle;border:1px solid rgba(0,0,0,.14)}
+  .pantally .pt-cav{color:var(--muted);margin-left:12px;font-size:10px}
+  @media (max-width:900px){ .pantally.show{display:none} }
+  .sw{width:16px;height:16px;border-radius:4px;border:1px solid rgba(0,0,0,.12);flex:none}
+  .legend-note{font-size:11px;color:var(--muted);margin:8px 0 2px;line-height:1.45}
+  .foot{border-top:1px solid var(--line);margin-top:11px;padding-top:9px;color:var(--muted);font-size:10.8px;line-height:1.5}
+  .foot b{color:var(--ink)}
+  .maplibregl-popup{max-width:320px!important}
+  .maplibregl-popup-content{font-family:var(--font);font-size:12px;padding:12px 14px;border-radius:10px}
+  .pp-title{font-weight:800;font-size:13.5px;margin-bottom:2px}
+  .pp-meta{color:var(--muted);font-size:11px;margin-bottom:8px}
+  .pp-grid{display:grid;grid-template-columns:auto 1fr;gap:3px 12px}
+  .pp-grid .k{color:var(--muted)}
+  .pp-grid .v{font-variant-numeric:tabular-nums;text-align:right;font-weight:600}
+  .pp-badge{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:5px;margin-left:5px}
+  .pp-cav{margin-top:8px;color:var(--muted);font-size:10.5px;border-top:1px solid var(--line);padding-top:6px}
+  .err{position:absolute;left:312px;top:64px;z-index:6;background:#fff3f2;border:1px solid #e7b7b1;color:#8a2b20;
+    font-size:11.5px;padding:8px 11px;border-radius:8px;max-width:320px;display:none}
+
+  /* ---- insights / decorators panel ---- */
+  .insights{position:absolute;right:12px;top:64px;bottom:12px;z-index:5;width:328px;overflow:auto;
+    background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:12px;padding:14px 15px;
+    box-shadow:0 6px 20px rgba(20,40,80,.10);font-size:12px}
+  .insights h2{font-size:12px;margin:0 0 4px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .ins-sec{border-top:1px solid var(--line);margin-top:13px;padding-top:11px}
+  .big{font-size:26px;font-weight:800;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1}
+  .big small{font-size:12px;font-weight:600;color:var(--muted);letter-spacing:0}
+  .subline{font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.45}
+  .segbar{height:16px;border-radius:5px;overflow:hidden;background:#eef2f8;display:flex;margin:9px 0 2px}
+  .segbar .fill{height:100%}
+  .meaning{font-size:11.5px;color:var(--ink);line-height:1.5;background:#f6f8fc;border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px;margin-top:9px}
+  .ranknote{font-size:10.5px;color:var(--muted);margin:2px 0 8px;line-height:1.4}
+  .cty{display:grid;grid-template-columns:80px 1fr 44px;gap:8px;align-items:center;margin:4px 0;cursor:pointer}
+  .cty:hover .cbar-bg{outline:1px solid var(--accent)}
+  .cname{font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cbar-bg{position:relative;height:13px;border-radius:3px;background:#eef2f8;overflow:hidden}
+  .cbar-el{position:absolute;left:0;top:0;height:100%}
+  .cval{font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums;text-align:right}
+  .covrow{display:grid;grid-template-columns:80px 1fr 38px;gap:8px;align-items:center;margin:3px 0}
+  .covrow .cbar-el{background:#2e8b57}
+  .covrow.cov0 .cbar-el{background:#c0392b}
+  /* ---- Risk Copilot ---- */
+  .copilot-fab{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;z-index:6;display:inline-flex;align-items:center;gap:6px;
+    background:var(--accent);color:#fff;border:0;border-radius:999px;padding:9px 16px;font-family:var(--font);font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(9,87,195,.35)}
+  .copilot{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;z-index:7;width:380px;max-width:calc(100vw - 24px);height:460px;max-height:72vh;
+    display:flex;flex-direction:column;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 34px rgba(20,40,80,.20);overflow:hidden}
+  .cop-head{padding:10px 13px;font-weight:800;font-size:13px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  .cop-x{cursor:pointer;color:var(--muted);font-size:19px;line-height:1}
+  .cop-msgs{flex:1;overflow:auto;padding:11px 12px;display:flex;flex-direction:column;gap:8px}
+  .cop-b{font-size:12.5px;line-height:1.45;padding:8px 11px;border-radius:10px;max-width:88%;white-space:pre-wrap}
+  .cop-b.user{align-self:flex-end;background:var(--accent);color:#fff}
+  .cop-b.assistant{align-self:flex-start;background:#f1f4f9;color:var(--ink)}
+  .cop-b.thinking{opacity:.55}
+  .cop-input{display:flex;gap:6px;padding:9px;border-top:1px solid var(--line)}
+  .cop-input textarea{flex:1;resize:none;font-family:var(--font);font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:7px 9px;max-height:80px}
+  .cop-input button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:0 13px;font-weight:700;cursor:pointer}
+  .cop-note{font-size:10px;color:var(--muted);padding:0 12px 8px;text-align:center}
+  #ins-focus{background:#eef4ff;border:1px solid #cfe0ff;border-radius:10px;padding:10px 12px;margin-bottom:12px}
+  .focus-head{font-size:12px;margin-bottom:4px}
+  .focus-head .bc{color:var(--accent);cursor:pointer;font-weight:600}
+  .focus-grid{display:grid;grid-template-columns:1fr auto;gap:2px 10px;margin-top:6px;font-size:11.5px}
+  .focus-grid .k{color:var(--muted)} .focus-grid .v{font-variant-numeric:tabular-nums;font-weight:600}
+  .focus-grid .kact{color:var(--accent)!important}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="pantally" id="pantally"></div>
+
+<div class="topbar">
+  <div>
+    <h1>Colorado P&amp;C Risk — Exposure Explorer</h1>
+    <div class="sub">2,771,126 buildings · 2,720,180 parcels · 24,868 H3 cells · risk <b>indicators</b>, not insurability determinations</div>
+  </div>
+  <span class="chip">Working draft</span>
+  <div class="perils" id="perils"></div>
+  <div class="submode" id="submode" style="display:none"></div>
+  <div class="zoom" id="zoom">Statewide</div>
+</div>
+
+<div class="err" id="err"></div>
+
+<div class="panel">
+  <h2 id="legend-title">Wildfire score</h2>
+  <div id="legend"></div>
+  <div class="legend-note" id="legend-scope"></div>
+  <div class="legend-note"><b>Zoom in to drill down:</b> counties → H3 hexes → parcels → individual buildings. Aggregates shade by the <b>selected peril's elevated share</b>, so they move with the toggle. <b>Click a county</b> to focus the panel on it.</div>
+  <div class="foot">
+    <b>Read before quoting.</b><br>
+    · <b>yearbuilt</b> is construction year, not roof age.<br>
+    · Hail is radar-detected density, not modelled severity.<br>
+    · Tornado / wind / winter are tract-resolution, not per-building.<br>
+    · Hazard is centroid-sampled for 98.24% of buildings.<br>
+    · Assessor <b>$</b> values are popup-only reference (≈63% coverage, county-dependent); never used for styling or ranking.<br>
+    · <b>NULL</b> road/station distance = <b>furthest</b> (no station within 25 km), not missing.
+  </div>
+</div>
+
+<div class="insights">
+  <div id="ins-focus" style="display:none"></div>
+  <h2>Statewide exposure</h2>
+  <div class="big" id="ins-big"></div>
+  <div class="subline" id="ins-subline"></div>
+  <div class="segbar" id="ins-seg"></div>
+  <div class="meaning" id="ins-meaning"></div>
+
+  <div class="ins-sec">
+    <h2 id="ins-cty-title">Counties by exposure</h2>
+    <div class="ranknote" id="ins-ranknote"></div>
+    <div id="ins-counties"></div>
+  </div>
+
+  <div class="ins-sec">
+    <h2>Assessor $ coverage — why not dollars</h2>
+    <div class="subline">Improvement-value coverage is ~63% and county-dependent. The largest exposures often publish the least — <b>El Paso</b> (the state's biggest, 290,630 buildings) reports <b>$0</b>. A dollar ramp maps who reports, not where risk is.</div>
+    <div id="ins-coverage" style="margin-top:9px"></div>
+  </div>
+</div>
+
+<button class="copilot-fab" id="copilot-fab">💬 Ask the map</button>
+<div class="copilot" id="copilot" style="display:none">
+  <div class="cop-head"><span>Risk Copilot</span><span class="cop-x" id="cop-x">×</span></div>
+  <div class="cop-msgs" id="cop-msgs"></div>
+  <div class="cop-input">
+    <textarea id="cop-text" rows="1" placeholder="Ask about the map, or tell it where to go…"></textarea>
+    <button id="cop-send">Send</button>
+  </div>
+  <div class="cop-note">Answers from county-level data · drives the map</div>
+</div>
+
+<script>
+"use strict";
+
+// ---- CONFIG -------------------------------------------------------------
+// Local dev default: serve the .pmtiles from a same-origin ./tiles/ folder
+// with a range-capable static server (see README). To point at remote
+// hosting later, set TILES_BASE to that origin, e.g.
+//   const TILES_BASE = "https://dxxxx.cloudfront.net/";
+const TILES_BASE = "https://co-pc-risk-tiles-benp-uw2.s3.us-west-2.amazonaws.com/tiles/";
+const FILES = { hex:"co_hex.pmtiles", parcels:"co_parcels.pmtiles", buildings:"co_buildings.pmtiles" };
+// ------------------------------------------------------------------------
+
+// Peril config. Score domains are correctness, not taste:
+//   wf/hail 0-2 ; flood/wind/access 0-1. Explicit match, never interpolate.
+const SAFE = "#f7f7f7";
+const PERILS = {
+  wildfire:{ label:"Wildfire", b:"wf_score",   p:"wf_max",   stops:[[0,SAFE],[1,"#fdae61"],[2,"#d73027"]] },
+  hail:    { label:"Hail",     b:"hail_score", p:"hail_max", stops:[[0,SAFE],[1,"#fdae61"],[2,"#d73027"]] },
+  flood:   { label:"Flood",    b:"flood_score",p:"flood_max",stops:[[0,SAFE],[1,"#4575b4"]] },
+  wind:    { label:"Wind",     b:"wind_score", p:"wind_max", stops:[[0,SAFE],[1,"#7b3294"]] },
+  access:  { label:"Access",   b:"access_score",p:"access_max",stops:[[0,SAFE],[1,"#d73027"]] },
+};
+let active = "all";
+// Toggle order: "All perils" (general exposure only) first, then one peril at a time.
+const PORDER = [["all","All perils"],["wildfire","Wildfire"],["hail","Hail"],["flood","Flood"],["wind","Wind"],["access","Access"]];
+
+function colorExpr(field, stops){
+  const m = ["match", ["to-number", ["get", field]]];
+  for(const [v,c] of stops){ m.push(v, c); }
+  m.push("#cccccc");            // default — should not be reached in a 0-2/0-1 domain
+  return m;
+}
+
+// Aggregate layers (county, hex) move WITH the peril: shaded by the ELEVATED SHARE
+// (elevated buildings / total), not by raw density. Share is a proportion (0..1),
+// so interpolate is correct here (unlike the 0-2/0-1 scores). Per-peril top-stop
+// keeps low-prevalence perils (flood) visible without saturating high ones (access).
+const HEXELEV  = { wildfire:"wf_elev", hail:"hail_elev", flood:"flood_elev", wind:"wind_elev", access:"access_elev" };
+const CTYSHARE = { wildfire:"wf_sh",   hail:"hail_sh",   flood:"flood_sh",   wind:"wind_sh",   access:"access_sh" };
+const PTOP     = { wildfire:0.5, hail:0.5, flood:0.06, wind:0.6, access:0.7 };
+function elevColorOf(k){ const s = PERILS[k].stops; return s[s.length-1][1]; }
+
+// "All perils" = general exposure only, shaded by building count in a NEUTRAL blue
+// ramp (not a peril color) so it reads as "how much is here", distinct from perils.
+const EXP = ["#f7f7f7","#a6bddb","#3690c0","#045a8d"];   // neutral exposure (count) ramp
+const EXP_SOLID = "#4a90c2";
+// "All perils" has a sub-mode: exposure (count) OR composite risk (mean of the 5 scores).
+let allMode = "exposure";
+const g = f => ["coalesce",["to-number",["get",f]],0];
+const riskAgg = v => ["interpolate",["linear"], v, 0,SAFE, 1,"#fdae61", 3,"#e34a33", 4.3,"#b30000"]; // county/hex mean composite (~0..4.3)
+const riskSum = v => ["interpolate",["linear"], v, 0,SAFE, 2,"#fdae61", 4,"#e34a33", 7,"#b30000"];    // per-feature sum of scores (0..7)
+const sumScores = ff => ["+", g(ff[0]), g(ff[1]), g(ff[2]), g(ff[3]), g(ff[4])];
+
+function countyFillColor(k){
+  if(k==="all") return allMode==="risk" ? riskAgg(g("avg_score"))
+    : ["interpolate",["linear"], g("buildings"), 0,EXP[0], 20000,EXP[1], 120000,EXP[2], 290000,EXP[3]];
+  return ["interpolate",["linear"],["coalesce",["to-number",["get",CTYSHARE[k]]],0], 0,SAFE, PTOP[k],elevColorOf(k)];
+}
+// Hex: in "All" → exposure count or composite avg_score; else elevated share for the
+// peril when the enriched fields exist (post-regen), density fallback until then.
+function hexFillColor(k){
+  const density = ["interpolate",["linear"], g("buildings"), 0,EXP[0], 100,EXP[1], 400,EXP[2], 800,EXP[3]];
+  if(k==="all") return allMode==="risk" ? riskAgg(g("avg_score")) : density;
+  const share = ["/", g(HEXELEV[k]), ["max", g("buildings"), 1]];
+  return ["case", ["has", HEXELEV[k]], ["interpolate",["linear"], share, 0,SAFE, PTOP[k],elevColorOf(k)], density];
+}
+// Parcels/buildings in "All": neutral exposure fill, or composite-sum risk; else peril score.
+function parcelFillColor(k){
+  if(k==="all") return allMode==="risk" ? riskSum(sumScores(["wf_max","hail_max","flood_max","wind_max","access_max"])) : EXP_SOLID;
+  return colorExpr(PERILS[k].p, PERILS[k].stops);
+}
+function buildingCircleColor(k){
+  if(k==="all") return allMode==="risk" ? riskSum(sumScores(["wf_score","hail_score","flood_score","wind_score","access_score"])) : EXP_SOLID;
+  return colorExpr(PERILS[k].b, PERILS[k].stops);
+}
+
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", protocol.tile);
+
+const map = new maplibregl.Map({
+  container:"map",
+  center:[-105.55, 39.0], zoom:6.3, minZoom:3, maxZoom:18,
+  style:{
+    version:8,
+    sources:{
+      base:{ type:"raster", tileSize:256,
+        tiles:["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+               "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
+        attribution:"© OpenStreetMap · © CARTO · <a href='https://regrid.com' target='_blank' rel='noopener'>Parcel data: Regrid</a> · Risk data: Wherobots" }
+    },
+    layers:[ { id:"base", type:"raster", source:"base" } ]
+  }
+});
+map.addControl(new maplibregl.NavigationControl({showCompass:false}), "bottom-left");
+map.addControl(new maplibregl.ScaleControl({unit:"imperial"}));
+
+function dist(v){
+  return (v===null||v===undefined||v==="") ? "≥25 km · furthest (no station in radius)" : Math.round(+v).toLocaleString()+" m";
+}
+function num(v,dp){ return (v===null||v===undefined||v==="") ? "—" : (dp!=null? (+v).toFixed(dp) : (+v).toLocaleString()); }
+function usd(v){ return (v===null||v===undefined||v===""||+v===0) ? "not published" : "$"+(+v).toLocaleString(); }
+
+map.on("load", ()=>{
+  map.addSource("hex",       { type:"vector", url:"pmtiles://"+TILES_BASE+FILES.hex });
+  map.addSource("parcels",   { type:"vector", url:"pmtiles://"+TILES_BASE+FILES.parcels });
+  map.addSource("buildings", { type:"vector", url:"pmtiles://"+TILES_BASE+FILES.buildings });
+  map.addSource("counties", { type:"geojson", data: window.COUNTY_GEO, promoteId:"county" });
+
+  // z0-7: county choropleth — shaded by ELEVATED SHARE for the active peril (moves with the toggle).
+  map.addLayer({
+    id:"county-fill", type:"fill", source:"counties", maxzoom:7,
+    paint:{ "fill-color":countyFillColor(active), "fill-opacity":0.78 }
+  });
+  map.addLayer({
+    id:"county-line", type:"line", source:"counties", maxzoom:7,
+    paint:{ "line-color":"#ffffff", "line-width":0.7, "line-opacity":0.8 }
+  });
+  map.addLayer({
+    id:"county-sel", type:"line", source:"counties", maxzoom:7.5,
+    filter:["==",["get","county"],"__none__"],
+    paint:{ "line-color":"var(--accent)".replace("var(--accent)","#0957c3"), "line-width":2.6 }
+  });
+
+  // z6.5-13: H3 hex — colored by the active peril's elevated share (density fallback pre-regen).
+  map.addLayer({
+    id:"hex-fill", type:"fill", source:"hex", "source-layer":"hex", minzoom:6.5, maxzoom:13,
+    paint:{
+      "fill-color":hexFillColor(active),
+      "fill-opacity":["interpolate",["linear"],["zoom"], 6.5,0.8, 11,0.6, 13,0.2]
+    }
+  });
+  map.addLayer({
+    id:"hex-line", type:"line", source:"hex", "source-layer":"hex", minzoom:6.5, maxzoom:13,
+    paint:{ "line-color":"#ffffff", "line-width":0.4, "line-opacity":0.5 }
+  });
+
+  // z10+: parcels, colored by the active peril's max-over-buildings score.
+  map.addLayer({
+    id:"parcels-fill", type:"fill", source:"parcels", "source-layer":"parcels", minzoom:10,
+    paint:{
+      "fill-color":parcelFillColor(active),
+      "fill-opacity":["interpolate",["linear"],["zoom"], 10,0.15, 12,0.55, 14,0.7],
+      "fill-outline-color":"rgba(0,0,0,0.15)"
+    }
+  });
+
+  // z14+: individual buildings, colored by the active peril score.
+  map.addLayer({
+    id:"buildings-circle", type:"circle", source:"buildings", "source-layer":"buildings", minzoom:14,
+    paint:{
+      "circle-color":buildingCircleColor(active),
+      "circle-radius":["interpolate",["linear"],["zoom"], 14,2, 17,4.5, 19,7],
+      "circle-stroke-color":"#ffffff", "circle-stroke-width":["interpolate",["linear"],["zoom"],14,0.2,18,0.8],
+      "circle-opacity":0.95
+    }
+  });
+
+  // Copilot hex-highlight overlay (always on top): marks the H3 cells the LLM surfaces.
+  map.addSource("hexhl", { type:"geojson", data:{type:"FeatureCollection",features:[]} });
+  map.addLayer({
+    id:"hexhl", type:"circle", source:"hexhl",
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"], 6,4, 9,9, 12,16, 14,26],
+      "circle-color":"#ffd400", "circle-opacity":0.30,
+      "circle-stroke-color":"#c026d3", "circle-stroke-width":2.2, "circle-stroke-opacity":0.95
+    }
+  });
+  // Load the 24,868-cell H3 rollup for the copilot's hex tools (queried in-browser, never sent to the LLM).
+  fetch("hexes.json").then(r=>r.json()).then(d=>{ window.HEXES=d; }).catch(()=>{});
+
+  wireInteractions();
+  detectTileErrors();
+});
+
+// ---- clickable legend filtering (single-peril score bands on the fine layers) ----
+const HIDDEN = new Set();  // peril-score values hidden for the active peril
+function applyPerilFilters(){
+  const setF=(id,f)=>{ if(map.getLayer(id)) map.setFilter(id, f); };
+  if(active==="all" || HIDDEN.size===0){ setF("parcels-fill",null); setF("buildings-circle",null); return; }
+  const P=PERILS[active];
+  const mk=field=>["all", ...[...HIDDEN].map(v=>["!",["==",g(field),v]])];
+  setF("parcels-fill", mk(P.p));
+  setF("buildings-circle", mk(P.b));
+}
+function applyPeril(){
+  HIDDEN.clear();
+  map.setPaintProperty("county-fill","fill-color", countyFillColor(active));
+  map.setPaintProperty("hex-fill","fill-color", hexFillColor(active));
+  map.setPaintProperty("parcels-fill","fill-color", parcelFillColor(active));
+  map.setPaintProperty("buildings-circle","circle-color", buildingCircleColor(active));
+  applyPerilFilters();
+  renderLegend();
+  if(typeof updatePanTally==="function") updatePanTally();
+}
+
+function renderLegend(){
+  if(active==="all"){
+    if(allMode==="risk"){
+      document.getElementById("legend-title").textContent = "Composite risk";
+      document.getElementById("legend").innerHTML =
+        [["lower",SAFE],["","#fdae61"],["","#e34a33"],["higher","#b30000"]]
+        .map(([lab,c])=>`<div class="legend-row"><span class="sw" style="background:${c}"></span><span>${lab}</span></div>`).join("");
+      document.getElementById("legend-scope").textContent =
+        "All-perils overview: shading = composite risk (mean of the five 0–2 / 0–1 scores). Toggle a single peril for its elevated share.";
+    } else {
+      document.getElementById("legend-title").textContent = "Building exposure";
+      document.getElementById("legend").innerHTML =
+        [["fewer",EXP[0]],["",EXP[1]],["",EXP[2]],["more buildings",EXP[3]]]
+        .map(([lab,c])=>`<div class="legend-row"><span class="sw" style="background:${c}"></span><span>${lab}</span></div>`).join("");
+      document.getElementById("legend-scope").textContent =
+        "All-perils overview: shading = building count (general exposure), the same across every zoom. Toggle a peril to recolor by that peril's elevated share.";
+    }
+    return;
+  }
+  const P = PERILS[active];
+  document.getElementById("legend-title").textContent = P.label + " score";
+  const dom = P.stops.length-1; // 2 for wf/hail, 1 for others
+  const labels = dom===2 ? {0:"0 · none detected",1:"1 · moderate",2:"2 · elevated"}
+                         : {0:"0 · none detected",1:"1 · elevated"};
+  let html = "";
+  for(const [v,c] of P.stops){
+    const off = HIDDEN.has(v) ? " off" : "";
+    html += `<div class="legend-row filterable${off}" data-score="${v}"><span class="sw" style="background:${c}"></span><span>${labels[v]}</span></div>`;
+  }
+  html += `<div class="legend-row" style="margin-top:7px;opacity:.7;font-size:11px">Tip: click a score to hide those parcels/buildings.</div>`;
+  document.getElementById("legend").innerHTML = html;
+  const scope = active==="access"
+    ? "Styled by access_score (0/1). access_score=1 = beyond 5 road miles / no fire station within 25 km — the most remote cohort is shown, never greyed out."
+    : (active==="wind"||active==="flood")
+      ? P.label+" score is 0–1 and (wind) tract-resolution; treat as a screening indicator."
+      : P.label+" score is a 0–2 screening indicator.";
+  document.getElementById("legend-scope").textContent = scope;
+}
+document.getElementById("legend").addEventListener("click",e=>{ const row=e.target.closest("[data-score]"); if(!row)return; const v=+row.dataset.score; HIDDEN.has(v)?HIDDEN.delete(v):HIDDEN.add(v); applyPerilFilters(); renderLegend(); setTimeout(updatePanTally,60); });
+
+// ---- Insights / decorators (authoritative per-county data from counties.js) ----
+// Statewide anchors — do not recompute (handoff wins).
+const TOTAL_BUILDINGS = 2771126;
+// Elevated field + elevated color + plain-language meaning, matched to the map styling.
+const PMETA = {
+  wildfire:{ elev:"wf_elev",     mean:"Elevated = wf_score 2, the top wildfire tier (307,679 buildings). A screening tier for where to look, not a loss estimate." },
+  hail:    { elev:"hail_elev",   mean:"Elevated = hail_score 2 (≥2 in radar-detected hail). This is hail density, not modelled severity." },
+  flood:   { elev:"flood_elev",  mean:"Elevated = flood_score 1 (in / adjacent to a mapped Special Flood Hazard Area)." },
+  wind:    { elev:"wind_elev",   mean:"Elevated = wind_score 1. Tract-resolution screening signal, not a per-building severity." },
+  access:  { elev:"access_elev", mean:"Elevated = access_score 1: beyond ~5 road miles / no fire station within 25 km. NULL distance means furthest, and is counted here — never greyed out." },
+};
+function fmt(n){ return (+n).toLocaleString("en-US"); }
+function statewide(field){ let s=0; for(const c of (window.COUNTIES||[])) s+=c[field]; return s; }
+
+function renderInsights(){
+  if(!window.COUNTIES) return;
+
+  if(active==="all"){
+    if(allMode==="risk"){
+      const RISKC = "#e34a33";
+      const wavg = window.COUNTIES.reduce((s,c)=>s+c.avg_score*c.buildings,0)/TOTAL_BUILDINGS;
+      document.getElementById("ins-big").innerHTML = wavg.toFixed(2) + ' <small>avg composite (0–7)</small>';
+      document.getElementById("ins-subline").textContent = "Building-weighted mean composite risk across Colorado (sum of the five 0–2 / 0–1 scores).";
+      document.getElementById("ins-seg").innerHTML = `<div class="fill" style="width:${Math.min(100,100*wavg/7)}%;background:${RISKC}"></div><div class="fill" style="width:${Math.max(0,100-100*wavg/7)}%;background:#eef2f8"></div>`;
+      document.getElementById("ins-meaning").textContent = "Composite view: shading = mean of the five peril scores. Highest in the eastern plains (ubiquitous wind + hail) and the mountain WUI. Pick a peril to isolate it.";
+      const cs = window.COUNTIES.slice().sort((a,b)=>b.avg_score-a.avg_score).slice(0,12);
+      const mx = cs[0].avg_score;
+      document.getElementById("ins-cty-title").textContent = "Counties by composite risk (0–7)";
+      document.getElementById("ins-ranknote").textContent = "Ranked by composite risk (mean of the five scores), never by $. Bar = avg composite (0–7). Click a county to zoom.";
+      document.getElementById("ins-counties").innerHTML = cs.map(c=>`<div class="cty" data-county="${c.county}" title="${c.county}: avg composite ${c.avg_score.toFixed(2)} · ${fmt(c.buildings)} buildings — click to focus">
+        <span class="cname">${c.county}</span>
+        <span class="cbar-bg" style="width:${100*c.avg_score/mx}%"><span class="cbar-el" style="width:100%;background:${RISKC}"></span></span>
+        <span class="cval">${c.avg_score.toFixed(2)}</span></div>`).join("");
+    } else {
+      document.getElementById("ins-big").innerHTML = fmt(TOTAL_BUILDINGS) + ' <small>buildings</small>';
+      document.getElementById("ins-subline").textContent = "Total building exposure across Colorado (2,720,180 parcels). Toggle a peril to see its elevated share.";
+      document.getElementById("ins-seg").innerHTML = `<div class="fill" style="width:100%;background:${EXP_SOLID}"></div>`;
+      document.getElementById("ins-meaning").textContent = "All-perils view: bars and shading show building exposure (count). Pick a peril to color the map and re-rank by that peril's elevated buildings.";
+      const cs = window.COUNTIES.slice().sort((a,b)=>b.buildings-a.buildings).slice(0,12);
+      const maxB = cs[0].buildings;
+      document.getElementById("ins-cty-title").textContent = "Counties by building exposure";
+      document.getElementById("ins-ranknote").textContent = "Ranked by building count. Bar length = buildings. Click a county to zoom.";
+      document.getElementById("ins-counties").innerHTML = cs.map(c=>`<div class="cty" data-county="${c.county}" title="${c.county}: ${fmt(c.buildings)} buildings — click to focus">
+        <span class="cname">${c.county}</span>
+        <span class="cbar-bg" style="width:${100*c.buildings/maxB}%"><span class="cbar-el" style="width:100%;background:${EXP_SOLID}"></span></span>
+        <span class="cval">${fmt(c.buildings)}</span></div>`).join("");
+    }
+    document.querySelectorAll("#ins-counties .cty").forEach(el=>{ el.onclick=()=>selectCounty(el.dataset.county,true); });
+    const cov0 = window.COUNTIES.slice().sort((a,b)=>b.buildings-a.buildings).slice(0,8);
+    document.getElementById("ins-coverage").innerHTML = cov0.map(c=>{
+      const pc = c.buildings ? 100*c.val_covered/c.buildings : 0;
+      return `<div class="covrow ${pc<5?'cov0':''}" title="${c.county}: ${pc.toFixed(1)}% of buildings have a published assessor value">
+        <span class="cname">${c.county}</span>
+        <span class="cbar-bg"><span class="cbar-el" style="width:${Math.max(pc,1)}%"></span></span>
+        <span class="cval">${pc.toFixed(0)}%</span></div>`;
+    }).join("");
+    updateFocus();
+    return;
+  }
+
+  const P = PERILS[active], meta = PMETA[active], col = elevColorOf(active);
+  const elev = statewide(meta.elev), pct = 100*elev/TOTAL_BUILDINGS;
+
+  document.getElementById("ins-big").innerHTML = fmt(elev) + ' <small>buildings</small>';
+  document.getElementById("ins-subline").textContent =
+    `${pct.toFixed(1)}% of Colorado's ${fmt(TOTAL_BUILDINGS)} buildings carry an elevated ${P.label.toLowerCase()} score.`;
+  document.getElementById("ins-seg").innerHTML =
+    `<div class="fill" style="width:${Math.max(pct,0.6)}%;background:${col}"></div>` +
+    `<div class="fill" style="width:${Math.max(100-pct,0)}%;background:#eef2f8"></div>`;
+  document.getElementById("ins-meaning").textContent = meta.mean;
+
+  // Counties ranked by building count (the rank-by-count rule). Bar = buildings; fill = elevated share.
+  const cs = window.COUNTIES.slice().sort((a,b)=>b.buildings-a.buildings).slice(0,12);
+  const maxB = cs[0].buildings;
+  document.getElementById("ins-cty-title").textContent = "Counties by exposure · " + P.label;
+  document.getElementById("ins-ranknote").textContent = "Ranked by building count, never by $. Fill = buildings with an elevated " + P.label.toLowerCase() + " score. Click a county to zoom.";
+  document.getElementById("ins-counties").innerHTML = cs.map(c=>{
+    const bw = 100*c.buildings/maxB;
+    const el = c.buildings ? 100*c[meta.elev]/c.buildings : 0;
+    return `<div class="cty" data-county="${c.county}" title="${c.county}: ${fmt(c.buildings)} buildings · ${fmt(c[meta.elev])} elevated ${P.label.toLowerCase()} — click to focus">
+      <span class="cname">${c.county}</span>
+      <span class="cbar-bg" style="width:${bw}%"><span class="cbar-el" style="width:${el}%;background:${col}"></span></span>
+      <span class="cval">${fmt(c[meta.elev])}</span></div>`;
+  }).join("");
+  document.querySelectorAll("#ins-counties .cty").forEach(el=>{
+    el.onclick = ()=> selectCounty(el.dataset.county, true);
+  });
+
+  // Coverage decorator — top exposures by building count, shaded by % of buildings with a published value.
+  const cov = window.COUNTIES.slice().sort((a,b)=>b.buildings-a.buildings).slice(0,8);
+  document.getElementById("ins-coverage").innerHTML = cov.map(c=>{
+    const pc = c.buildings ? 100*c.val_covered/c.buildings : 0;
+    return `<div class="covrow ${pc<5?'cov0':''}" title="${c.county}: ${pc.toFixed(1)}% of buildings have a published assessor value">
+      <span class="cname">${c.county}</span>
+      <span class="cbar-bg"><span class="cbar-el" style="width:${Math.max(pc,1)}%"></span></span>
+      <span class="cval">${pc.toFixed(0)}%</span></div>`;
+  }).join("");
+
+  updateFocus();
+}
+
+// ---- Selection: click a county (map or bar) to focus the panel on it ----
+let selectedCounty = null;
+function selectCounty(name, fly){
+  selectedCounty = (selectedCounty===name) ? null : name;
+  if(map.getLayer("county-sel"))
+    map.setFilter("county-sel", ["==",["get","county"], selectedCounty||"__none__"]);
+  if(fly && selectedCounty){
+    const c = window.COUNTIES.find(x=>x.county===selectedCounty);
+    if(c) map.flyTo({ center:[c.clon,c.clat], zoom:9.2, duration:1200 });
+  }
+  updateFocus();
+}
+function updateFocus(){
+  const el = document.getElementById("ins-focus"); if(!el || !window.COUNTIES) return;
+  if(!selectedCounty){ el.style.display="none"; el.innerHTML=""; return; }
+  const c = window.COUNTIES.find(x=>x.county===selectedCounty);
+  if(!c){ el.style.display="none"; return; }
+  const rows = [["Wildfire · wf=2","wf_elev"],["Hail · hail=2","hail_elev"],["Flood · =1","flood_elev"],
+                ["Wind · =1","wind_elev"],["Access · =1","access_elev"]];
+  const cov = (100*c.val_covered/c.buildings).toFixed(1);
+  const actF = PMETA[active] ? PMETA[active].elev : null;
+  el.style.display="block";
+  el.innerHTML = `<div class="focus-head"><span class="bc" id="focus-back">‹ Statewide</span> · <b>${c.county} County</b></div>
+    <div class="big">${fmt(c.buildings)} <small>buildings</small></div>
+    <div class="focus-grid">${rows.map(([lab,f])=>
+      `<span class="k ${actF===f?'kact':''}">${lab}</span><span class="v ${actF===f?'kact':''}">${fmt(c[f])}</span>`).join("")}
+      <span class="k">Assessor $ coverage</span><span class="v">${cov}%</span></div>`;
+  document.getElementById("focus-back").onclick = ()=>{
+    selectedCounty = null;
+    if(map.getLayer("county-sel")) map.setFilter("county-sel", ["==",["get","county"],"__none__"]);
+    updateFocus();
+  };
+}
+
+// ---- Peril toggle UI ----
+(function(){
+  const host = document.getElementById("perils");
+  PORDER.forEach(([k,label],i)=>{
+    const lab = document.createElement("label");
+    lab.className = i===0 ? "on" : "";
+    lab.innerHTML = `<input type="radio" name="peril" value="${k}" ${i===0?"checked":""}><span>${label}</span>`;
+    lab.addEventListener("click", ()=>{
+      active = k;
+      [...host.children].forEach(c=>c.classList.remove("on"));
+      lab.classList.add("on");
+      lab.querySelector("input").checked = true;
+      updateSubmode();
+      renderLegend();
+      renderInsights();
+      if(map.getLayer("parcels-fill")) applyPeril();
+    });
+    host.appendChild(lab);
+  });
+})();
+
+// ---- "All perils" sub-mode: Exposure (count) vs Composite risk (avg score) ----
+(function(){
+  const host = document.getElementById("submode");
+  [["exposure","Exposure"],["risk","Composite risk"]].forEach(([m,label],i)=>{
+    const b=document.createElement("button"); b.textContent=label; b.dataset.m=m; if(i===0) b.className="on";
+    b.onclick=()=>{
+      allMode=m; [...host.children].forEach(c=>c.classList.remove("on")); b.classList.add("on");
+      renderLegend(); renderInsights(); if(map.getLayer("county-fill")) applyPeril();
+    };
+    host.appendChild(b);
+  });
+})();
+function updateSubmode(){ document.getElementById("submode").style.display = (active==="all") ? "inline-flex" : "none"; }
+
+renderLegend();
+renderInsights();
+updateSubmode();
+
+// ---- live pan-tally: buildings / parcels on screen now, by peril score (respects legend filters) ----
+function ptDedupe(feats){ const seen=new Set(), out=[]; for(const f of feats){ const p=f.properties||{}; const k=(f.id!=null?f.id:(p.id||p.ll_uuid||p.parcelnumb||p.geoid||JSON.stringify(f.geometry&&f.geometry.coordinates&&(f.geometry.coordinates[0]||f.geometry.coordinates)))); if(seen.has(k))continue; seen.add(k); out.push(f);} return out; }
+function coCountScores(u, field){ const by={0:0,1:0,2:0}; u.forEach(f=>{ let v=Math.round(+((f.properties||{})[field])||0); if(v<0)v=0; if(v>2)v=2; by[v]++; }); return by; }
+function coRows(by, P){ const two=P.stops.length>2; return P.stops.slice().reverse().map(([v,c])=>{ const lab = v===0?"none":(v===2?"elevated":(two?"moderate":"elevated")); return [lab, by[v]||0, c]; }); }
+function updatePanTally(){
+  const box=document.getElementById("pantally"); if(!box||!map.isStyleLoaded()) return;
+  const vis=id=> map.getLayer(id) && map.getLayoutProperty(id,"visibility")!=="none";
+  const P = active!=="all" ? PERILS[active] : null;
+  let title="", rows=[];
+  try{
+    if(vis("buildings-circle")){ const u=ptDedupe(map.queryRenderedFeatures({layers:["buildings-circle"]})); if(u.length){ title=`${u.length.toLocaleString()} buildings in view`; if(P) rows=coRows(coCountScores(u,P.b),P); } }
+    if(!title && vis("parcels-fill")){ const u=ptDedupe(map.queryRenderedFeatures({layers:["parcels-fill"]})); if(u.length){ title=`${u.length.toLocaleString()} parcels in view`; if(P) rows=coRows(coCountScores(u,P.p),P); } }
+    if(!title && vis("hex-fill")){ const u=ptDedupe(map.queryRenderedFeatures({layers:["hex-fill"]})); if(u.length){ title=`${u.length.toLocaleString()} grid cells in view`; } }
+  }catch(e){}
+  if(!title){ box.classList.remove("show"); return; }
+  const cav = P ? `${P.label} · on screen now · a floor` : "exposure in view · on screen now";
+  box.classList.add("show");
+  box.innerHTML = `<b>${title}</b>` + rows.map(([l,n,c])=>`<span class="pt-sw" style="background:${c}"></span>${l} <b>${n.toLocaleString()}</b>`).join("") + `<span class="pt-cav">${cav}</span>`;
+}
+map.on("moveend", updatePanTally);
+map.on("idle", updatePanTally);
+map.on("zoom", ()=>{ const z=map.getZoom(); document.getElementById("zoom").textContent = z<7?"Statewide":z<9?"Region":z<11?"Metro":z<13?"Neighborhood":"Street"; });
+
+// ---- Popups ----
+function scoreBadge(v,dom){
+  if(v===null||v===undefined) return "";
+  const c = dom===2 ? {0:SAFE,1:"#fdae61",2:"#d73027"}[+v] : {0:SAFE,1:"#d73027"}[+v];
+  return `<span class="pp-badge" style="background:${c};color:${(+v>0)?'#fff':'#333'}">${v}</span>`;
+}
+function row(k,v){ return `<span class="k">${k}</span><span class="v">${v}</span>`; }
+
+function buildingPopup(f){
+  const p = f.properties;
+  return `<div class="pp-title">Building ${scoreBadge(p[PERILS[active].b], PERILS[active].stops.length-1)}</div>
+    <div class="pp-meta">${p.county||""} · ${p.usedesc||"use n/a"} · id ${(p.building_id||"").slice(0,8)}</div>
+    <div class="pp-grid">
+      ${row("Wildfire (0–2)", num(p.wf_score))}
+      ${row("Hail (0–2)", num(p.hail_score))}
+      ${row("Flood (0–1)", num(p.flood_score))}
+      ${row("Wind (0–1)", num(p.wind_score))}
+      ${row("Access (0–1)", num(p.access_score))}
+      ${row("Max hail", num(p.max_hail_in,1)+" in")}
+      ${row("In SFHA", (+p.in_sfha)?"yes":"no")}
+      ${row("Burn prob", num(p.burn_prob,3))}
+      ${row("Flame length", num(p.flame_len,1))}
+      ${row("Year built", num(p.yearbuilt))}
+      ${row("Road dist", dist(p.road_m_est))}
+      ${row("Fire station", dist(p.station_m))}
+      ${row("NRI rating", p.RISK_RATNG||"—")}
+      ${row("Assessor $", usd(p.improv_val))}
+    </div>
+    <div class="pp-cav">yearbuilt = construction year (not roof age). $ is reference only (≈63% coverage), not used for styling.</div>`;
+}
+function parcelPopup(f){
+  const p = f.properties;
+  return `<div class="pp-title">Parcel ${scoreBadge(p[PERILS[active].p], PERILS[active].stops.length-1)}</div>
+    <div class="pp-meta">${p.parcel_county||""} · ${p.usedesc||"use n/a"} · ${p.parcelnumb||""}</div>
+    <div class="pp-grid">
+      ${row("Buildings on parcel", num(p.buildings))}
+      ${row("Wildfire max (0–2)", num(p.wf_max))}
+      ${row("Hail max (0–2)", num(p.hail_max))}
+      ${row("Flood max (0–1)", num(p.flood_max))}
+      ${row("Wind max (0–1)", num(p.wind_max))}
+      ${row("Access max (0–1)", num(p.access_max))}
+      ${row("Max hail", num(p.max_hail_in,1)+" in")}
+      ${row("In SFHA", (+p.in_sfha)?"yes":"no")}
+      ${row("Assessor $ (parval)", usd(p.parval))}
+    </div>
+    <div class="pp-cav">$ is popup-only reference (≈63% coverage, county-dependent); never used for styling or ranking.</div>`;
+}
+function hexPopup(f){
+  const p = f.properties;
+  return `<div class="pp-title">H3 cell · ${num(p.buildings)} buildings</div>
+    <div class="pp-meta">${p.county||""}</div>
+    <div class="pp-grid">
+      ${row("Buildings", num(p.buildings))}
+      ${row("Mean composite score", num(p.avg_score,2))}
+      ${row("Max hail", num(p.max_hail,1)+" in")}
+      ${row("Mean burn prob", num(p.avg_bp,3))}
+      ${row("In SFHA (count)", num(p.in_sfha))}
+    </div>`;
+}
+
+// Bounding box of a GeoJSON Polygon/MultiPolygon, for click-to-zoom framing.
+function geomBounds(g){
+  if(!g) return null;
+  const b = new maplibregl.LngLatBounds();
+  const addRing = r => r.forEach(c => b.extend(c));
+  if(g.type==="Polygon") g.coordinates.forEach(addRing);
+  else if(g.type==="MultiPolygon") g.coordinates.forEach(poly => poly.forEach(addRing));
+  else return null;
+  return b.isEmpty() ? null : b;
+}
+
+function wireInteractions(){
+  const clickable = ["buildings-circle","parcels-fill","hex-fill","county-fill"];
+  map.on("mousemove", e=>{
+    const f = map.queryRenderedFeatures(e.point,{layers:clickable.filter(l=>map.getLayer(l))});
+    map.getCanvas().style.cursor = f.length ? "pointer" : "";
+  });
+  map.on("click", e=>{
+    for(const layer of clickable){
+      if(!map.getLayer(layer)) continue;
+      const fs = map.queryRenderedFeatures(e.point,{layers:[layer]});
+      if(fs.length){
+        const f = fs[0];
+        if(layer==="county-fill"){ selectCounty(f.properties.county, true); return; }
+        // Drill-in on click: frame the clicked feature as well as showing its popup.
+        // Hex -> parcel level (~z12-13); parcel -> building level (z14+).
+        if(layer==="hex-fill"){ const b=geomBounds(f.geometry); if(b) map.fitBounds(b,{padding:60, maxZoom:13, duration:900}); }
+        else if(layer==="parcels-fill"){ const b=geomBounds(f.geometry); if(b) map.fitBounds(b,{padding:80, maxZoom:17, duration:900}); }
+        const html = layer==="buildings-circle" ? buildingPopup(f)
+                   : layer==="parcels-fill" ? parcelPopup(f) : hexPopup(f);
+        new maplibregl.Popup({maxWidth:"320px"}).setLngLat(e.lngLat).setHTML(html).addTo(map);
+        return;
+      }
+    }
+  });
+}
+
+// Surface the classic opaque failure mode (missing Range/CORS, or tiles absent)
+function detectTileErrors(){
+  let shown=false;
+  map.on("error", e=>{
+    const msg = (e && e.error && e.error.message) || "";
+    if(shown) return;
+    if(/pmtiles|range|fetch|CORS|416|403|404|Failed/i.test(msg) || /pmtiles/.test((e.sourceId||""))){
+      shown=true;
+      const el=document.getElementById("err");
+      el.style.display="block";
+      el.innerHTML = "<b>Tiles not loading.</b> Confirm the .pmtiles files are in <code>./tiles/</code> and served by a <b>range-capable</b> static server (see README). Remote hosts also need CORS + <code>Range</code> allowed.";
+    }
+  });
+}
+
+// ---- Risk Copilot: an LLM that reasons over the data and drives the map ----
+// Tools execute here (they move the MapLibre map); /api/chat holds the key + system prompt.
+function findCounty(name){
+  if(!name || !window.COUNTIES) return null;
+  const n = String(name).toLowerCase().replace(/\s+county$/,"").trim();
+  return window.COUNTIES.find(c=>c.county.toLowerCase()===n)
+      || window.COUNTIES.find(c=>c.county.toLowerCase().startsWith(n)) || null;
+}
+const mapTools = {
+  set_peril: ({peril})=>{ const inp=document.querySelector('#perils input[value="'+peril+'"]'); if(!inp) return {error:"unknown peril"}; inp.closest("label").click(); return {ok:true, active}; },
+  set_all_mode: ({mode})=>{ if(active!=="all"){ const i=document.querySelector('#perils input[value="all"]'); if(i) i.closest("label").click(); } const b=document.querySelector('#submode button[data-m="'+mode+'"]'); if(!b) return {error:"unknown mode"}; b.click(); return {ok:true, allMode}; },
+  fly_to_county: ({county})=>{ const c=findCounty(county); if(!c) return {error:"unknown county: "+county}; map.flyTo({center:[c.clon,c.clat],zoom:9.2,duration:1200}); return {ok:true, county:c.county}; },
+  focus_county: ({county})=>{ const c=findCounty(county); if(!c) return {error:"unknown county: "+county}; if(selectedCounty!==c.county) selectCounty(c.county,true); else map.flyTo({center:[c.clon,c.clat],zoom:9.2}); return {ok:true, county:c.county, buildings:c.buildings}; },
+  clear_focus: ()=>{ if(selectedCounty){ selectedCounty=null; if(map.getLayer("county-sel")) map.setFilter("county-sel",["==",["get","county"],"__none__"]); updateFocus(); } return {ok:true}; },
+  fit_colorado: ()=>{ map.flyTo({center:[-105.55,39.0],zoom:6.3,duration:1200}); return {ok:true}; },
+  get_map_state: ()=>({ active, allMode:(active==="all"?allMode:null), zoom:+map.getZoom().toFixed(1), selectedCounty:selectedCounty||null }),
+  find_hexes: ({county, peril="all", n=10, move=true})=>{
+    if(!window.HEXES) return {error:"hex data still loading — ask again in a moment"};
+    const HXK={wildfire:"wf",hail:"ha",flood:"fl",wind:"wi",access:"ac"};
+    let rows=window.HEXES, cname=null;
+    if(county){ const c=findCounty(county); if(!c) return {error:"unknown county: "+county}; cname=c.county; rows=rows.filter(h=>h.ct===cname); }
+    const key=HXK[peril], isAll=!key;
+    // Composite ranks by avg_score but needs a building floor so 2-building outliers don't dominate;
+    // peril ranks by elevated COUNT, which already self-limits to populated cells.
+    const ranked = isAll
+      ? rows.filter(h=>h.b>=20).sort((a,b)=> b.s-a.s || b.b-a.b)
+      : rows.filter(h=>h[key]>0).sort((a,b)=> b[key]-a[key] || (b[key]/b.b)-(a[key]/a.b));
+    n=Math.max(1,Math.min(25, (n|0)||10));
+    const top=ranked.slice(0,n).map(h=>{
+      const o={lon:h.lon, lat:h.lat, county:h.ct, buildings:h.b, avg_score:h.s};
+      if(!isAll){ o[peril]=h[key]; o.share=+(h[key]/Math.max(h.b,1)).toFixed(2); }
+      if(h.sfha) o.in_sfha=1;
+      return o;
+    });
+    if(move) highlightHexes(top);
+    return { peril:isAll?"composite":peril, county:cname, cells_matched:ranked.length, showing:top.length, hexes:top };
+  },
+  clear_hex_highlight: ()=>{ const s=map.getSource("hexhl"); if(s) s.setData({type:"FeatureCollection",features:[]}); return {ok:true}; }
+};
+function highlightHexes(list){
+  const s=map.getSource("hexhl"); if(!s) return;
+  s.setData({ type:"FeatureCollection", features:list.map(h=>({ type:"Feature", geometry:{type:"Point",coordinates:[h.lon,h.lat]}, properties:{} })) });
+  if(!list.length) return;
+  if(list.length===1){ map.flyTo({center:[list[0].lon,list[0].lat], zoom:11, duration:1000}); return; }
+  const b=new maplibregl.LngLatBounds(); list.forEach(h=>b.extend([h.lon,h.lat]));
+  map.fitBounds(b,{padding:80, maxZoom:11, duration:1000});
+}
+window.mapTools = mapTools;
+
+const copMsgs = [];
+const cop = {};
+function copBubble(role, text){ const d=document.createElement("div"); d.className="cop-b "+role; d.textContent=text; cop.list.appendChild(d); cop.list.scrollTop=cop.list.scrollHeight; return d; }
+let copThinkEl=null;
+function copThink(on, text){ if(on){ if(!copThinkEl){ copThinkEl=copBubble("assistant",text||"Thinking…"); copThinkEl.classList.add("thinking"); } else { copThinkEl.textContent=text||"Thinking…"; } cop.list.scrollTop=cop.list.scrollHeight; } else if(copThinkEl){ copThinkEl.remove(); copThinkEl=null; } }
+const TOOL_LABEL={ set_peril:i=>"Switching to "+(i.peril==="all"?"all perils":i.peril), set_all_mode:i=>"Switching to "+i.mode+" view", fly_to_county:i=>"Flying to "+i.county, focus_county:i=>"Focusing "+i.county, clear_focus:()=>"Clearing focus", fit_colorado:()=>"Zooming to Colorado", get_map_state:()=>"Checking the map", find_hexes:i=>"Finding worst "+(i.peril==="all"?"":i.peril+" ")+"cells"+(i.county?" in "+i.county:" statewide"), clear_hex_highlight:()=>"Clearing highlights" };
+async function copRun(){
+  for(let round=0; round<6; round++){
+    copThink(true, "Thinking…");
+    let data;
+    try{
+      const r = await fetch("/api/chat",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({messages:copMsgs})});
+      data = await r.json();
+      if(!r.ok){ copThink(false); copBubble("assistant","⚠ "+(data && data.error ? data.error : ("error "+r.status))); return; }
+    }catch(e){ copThink(false); copBubble("assistant","⚠ Couldn't reach the copilot service. Try again in a moment."); return; }
+    copMsgs.push({role:"assistant", content:data.content});
+    const txt=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n").trim();
+    const tus=(data.content||[]).filter(b=>b.type==="tool_use");
+    if(data.stop_reason==="tool_use" && tus.length){
+      if(txt){ copThink(false); copBubble("assistant", txt); }
+      const label = tus.map(tu=> (TOOL_LABEL[tu.name]?TOOL_LABEL[tu.name](tu.input||{}):tu.name)).join(" · ");
+      copThink(true, label+"…");
+      const results = tus.map(tu=>{ let out; try{ out = mapTools[tu.name] ? mapTools[tu.name](tu.input||{}) : {error:"unknown tool "+tu.name}; }catch(e){ out={error:String(e)}; } return {type:"tool_result", tool_use_id:tu.id, content:JSON.stringify(out)}; });
+      copMsgs.push({role:"user", content:results});
+      continue;
+    }
+    copThink(false);
+    if(txt) copBubble("assistant", txt);
+    else copBubble("assistant","(done)");
+    return;
+  }
+  copThink(false);
+}
+function copSend(){ const t=cop.text.value.trim(); if(!t) return; cop.text.value=""; copBubble("user",t); copMsgs.push({role:"user", content:t}); copRun(); }
+(function(){
+  cop.panel=document.getElementById("copilot"); cop.list=document.getElementById("cop-msgs"); cop.text=document.getElementById("cop-text");
+  document.getElementById("copilot-fab").onclick=()=>{ cop.panel.style.display="flex"; document.getElementById("copilot-fab").style.display="none";
+    if(!cop.list.children.length) copBubble("assistant","Ask me about Colorado exposure — e.g. “worst wildfire counties” or “show me El Paso hail”. I can move the map for you.");
+    cop.text.focus(); };
+  document.getElementById("cop-x").onclick=()=>{ cop.panel.style.display="none"; document.getElementById("copilot-fab").style.display="inline-flex"; };
+  document.getElementById("cop-send").onclick=copSend;
+  cop.text.addEventListener("keydown",e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); copSend(); } });
+})();
+</script>
+</body>
+</html>
