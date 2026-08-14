@@ -48,8 +48,12 @@
   .pantally .pt-sw{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 4px 0 12px;vertical-align:middle;border:1px solid rgba(0,0,0,.14)}
   .pantally .pt-cav{color:var(--muted);margin-left:12px;font-size:10px}
   @media (max-width:900px){ .pantally.show{display:none} }
+  .pantally .pt-lu{color:var(--muted);margin-left:12px;font-size:10.5px}
   .sw{width:16px;height:16px;border-radius:4px;border:1px solid rgba(0,0,0,.12);flex:none}
   .legend-note{font-size:11px;color:var(--muted);margin:8px 0 2px;line-height:1.45}
+  .lu-chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
+  .lu-chips button{font-family:inherit;font-size:11px;font-weight:600;color:var(--muted);background:#eef2f8;border:0;border-radius:999px;padding:4px 10px;cursor:pointer}
+  .lu-chips button.on{background:var(--accent);color:#fff}
   .foot{border-top:1px solid var(--line);margin-top:11px;padding-top:9px;color:var(--muted);font-size:10.8px;line-height:1.5}
   .foot b{color:var(--ink)}
   .maplibregl-popup{max-width:320px!important}
@@ -123,6 +127,7 @@
   <span class="chip">Working draft</span>
   <div class="perils" id="perils"></div>
   <div class="submode" id="submode" style="display:none"></div>
+  <div class="submode" id="floodmode" style="display:none"></div>
   <div class="zoom" id="zoom">Statewide</div>
 </div>
 
@@ -132,6 +137,12 @@
   <h2 id="legend-title">Wildfire score</h2>
   <div id="legend"></div>
   <div class="legend-note" id="legend-scope"></div>
+  <!-- Land use: hidden until the tiles actually carry `land_use` (feature-detected). -->
+  <div id="lu-sec" style="display:none">
+    <h2 style="margin-top:12px">Land use</h2>
+    <div class="lu-chips" id="lu-chips"></div>
+    <div class="legend-note">Filters parcels &amp; buildings (z10+); county/hex aggregates are unaffected.</div>
+  </div>
   <div class="legend-note"><b>Zoom in to drill down:</b> counties → H3 hexes → parcels → individual buildings. Aggregates shade by the <b>selected peril's elevated share</b>, so they move with the toggle. <b>Click a county</b> to focus the panel on it.</div>
   <div class="foot">
     <b>Read before quoting.</b><br>
@@ -202,6 +213,33 @@ let active = "all";
 // Toggle order: "All perils" (general exposure only) first, then one peril at a time.
 const PORDER = [["all","All perils"],["wildfire","Wildfire"],["hail","Hail"],["flood","Flood"],["wind","Wind"],["access","Access"]];
 
+// ---- optional tile fields (post-regen), feature-detected — never assumed ----
+// A future tile export adds `land_use` (res/com/ind/agr/inst/vac/other/unknown, on
+// parcels AND buildings) and `fema_flood_zone` (raw zone code, parcels only). The tile
+// metadata carries no field list (vector_layers[].fields is empty), so the only probe
+// is a loaded feature: see detectTileExtras(). With today's tiles nothing is found and
+// every control below stays hidden — behavior is unchanged.
+const EXTRAS = { land_use:null, flood_zone:false };   // land_use null = undecided yet
+let luFilter = "all";                                  // land-use chip state
+let floodMode = "sfha";                                // flood sub-mode: "sfha" | "zones"
+const LU_LABEL = { res:"Residential", com:"Commercial", ind:"Industrial", agr:"Agricultural",
+                   inst:"Institutional", vac:"Vacant land", other:"Other", unknown:"Unknown" };
+
+// FEMA zone groups: A*-series (1% annual chance, SFHA) / V* coastal / X-B-C moderate to
+// minimal / D undetermined. Codes are exact — subtype prose is stripped at export.
+const FZ_GROUPS = [
+  ["A / AE / AH / AO / AR / A99 — 1% annual (SFHA)", ["A","AE","AH","AO","AR","A99"], "#4575b4"],
+  ["V / VE — coastal high hazard",                   ["V","VE"],                      "#54278f"],
+  ["X / B / C — moderate to minimal",                ["X","B","C"],                   "#cfe0f0"],
+  ["D — undetermined",                               ["D"],                           "#c2c8d0"],
+];
+function floodZoneColor(){
+  const m = ["match", ["get","fema_flood_zone"]];
+  for(const [,codes,c] of FZ_GROUPS) m.push(codes, c);
+  m.push(SAFE);                                        // unrecognised code
+  return ["case", ["has","fema_flood_zone"], m, SAFE]; // NULL zone omitted per feature
+}
+
 function colorExpr(field, stops){
   const m = ["match", ["to-number", ["get", field]]];
   for(const [v,c] of stops){ m.push(v, c); }
@@ -245,6 +283,7 @@ function hexFillColor(k){
 // Parcels/buildings in "All": neutral exposure fill, or composite-sum risk; else peril score.
 function parcelFillColor(k){
   if(k==="all") return allMode==="risk" ? riskSum(sumScores(["wf_max","hail_max","flood_max","wind_max","access_max"])) : EXP_SOLID;
+  if(k==="flood" && floodMode==="zones" && EXTRAS.flood_zone) return floodZoneColor();
   return colorExpr(PERILS[k].p, PERILS[k].stops);
 }
 function buildingCircleColor(k){
@@ -352,13 +391,22 @@ map.on("load", ()=>{
 
 // ---- clickable legend filtering (single-peril score bands on the fine layers) ----
 const HIDDEN = new Set();  // peril-score values hidden for the active peril
+function landUseFilter(){
+  if(EXTRAS.land_use!==true || luFilter==="all") return null;
+  if(luFilter==="other") return ["!",["in",["get","land_use"],["literal",["res","com","ind"]]]];
+  return ["==",["get","land_use"],luFilter];
+}
 function applyPerilFilters(){
   const setF=(id,f)=>{ if(map.getLayer(id)) map.setFilter(id, f); };
-  if(active==="all" || HIDDEN.size===0){ setF("parcels-fill",null); setF("buildings-circle",null); return; }
-  const P=PERILS[active];
-  const mk=field=>["all", ...[...HIDDEN].map(v=>["!",["==",g(field),v]])];
-  setF("parcels-fill", mk(P.p));
-  setF("buildings-circle", mk(P.b));
+  const lu = landUseFilter();
+  const mk = field => {
+    const parts = (active!=="all" && HIDDEN.size) ? [...HIDDEN].map(v=>["!",["==",g(field),v]]) : [];
+    if(lu) parts.push(lu);
+    return parts.length ? ["all", ...parts] : null;
+  };
+  const P = active!=="all" ? PERILS[active] : null;
+  setF("parcels-fill", mk(P && P.p));
+  setF("buildings-circle", mk(P && P.b));
 }
 function applyPeril(){
   HIDDEN.clear();
@@ -388,6 +436,17 @@ function renderLegend(){
       document.getElementById("legend-scope").textContent =
         "All-perils overview: shading = building count (general exposure), the same across every zoom. Toggle a peril to recolor by that peril's elevated share.";
     }
+    return;
+  }
+  // FEMA zone sub-mode (flood only, post-regen tiles): categorical zone legend,
+  // non-filterable — the score-band click filter belongs to the SFHA view.
+  if(active==="flood" && floodMode==="zones" && EXTRAS.flood_zone){
+    document.getElementById("legend-title").textContent = "FEMA flood zone";
+    document.getElementById("legend").innerHTML = FZ_GROUPS.map(([lab,,c])=>
+      `<div class="legend-row"><span class="sw" style="background:${c}"></span><span>${lab}</span></div>`).join("")
+      + `<div class="legend-row"><span class="sw" style="background:${SAFE}"></span><span>No zone on parcel</span></div>`;
+    document.getElementById("legend-scope").textContent =
+      "Raw FEMA zone code per parcel — a regulatory designation, not a loss model. Buildings keep the 0–1 flood score; SFHA is the default view.";
     return;
   }
   const P = PERILS[active];
@@ -579,7 +638,64 @@ function updateFocus(){
     host.appendChild(b);
   });
 })();
-function updateSubmode(){ document.getElementById("submode").style.display = (active==="all") ? "inline-flex" : "none"; }
+// ---- Flood sub-mode: binary SFHA (default — today's behavior) vs FEMA zone coloring.
+// The toggle only appears once the tiles carry `fema_flood_zone` (see detectTileExtras).
+(function(){
+  const host = document.getElementById("floodmode");
+  [["sfha","SFHA"],["zones","FEMA zones"]].forEach(([m,label],i)=>{
+    const b=document.createElement("button"); b.textContent=label; b.dataset.m=m; if(i===0) b.className="on";
+    b.onclick=()=>{
+      floodMode=m; [...host.children].forEach(c=>c.classList.remove("on")); b.classList.add("on");
+      renderLegend(); if(map.getLayer("parcels-fill")) applyPeril();
+    };
+    host.appendChild(b);
+  });
+})();
+function updateSubmode(){
+  document.getElementById("submode").style.display = (active==="all") ? "inline-flex" : "none";
+  document.getElementById("floodmode").style.display = (active==="flood" && EXTRAS.flood_zone) ? "inline-flex" : "none";
+}
+
+// ---- optional-field detection + land-use chips (see EXTRAS above) ----
+function buildLandUseChips(){
+  const host = document.getElementById("lu-chips");
+  if(!host || host.children.length) return;
+  [["all","All"],["res","Residential"],["com","Commercial"],["ind","Industrial"],["other","Other"]].forEach(([k,label])=>{
+    const b=document.createElement("button"); b.textContent=label; b.dataset.lu=k; if(k===luFilter) b.className="on";
+    b.onclick=()=>{
+      luFilter=k; [...host.children].forEach(c=>c.classList.remove("on")); b.classList.add("on");
+      applyPerilFilters(); setTimeout(updatePanTally,60);
+    };
+    host.appendChild(b);
+  });
+  document.getElementById("lu-sec").style.display="";
+}
+// Probe loaded parcel tiles for the optional fields. `land_use` is written on EVERY
+// parcel in the enriched export, so one feature decides it (and its absence means
+// pre-regen tiles — settle and stop probing). `fema_flood_zone` is NULL outside
+// mapped zones and null properties are omitted per feature, so keep scanning batches
+// on idle until one shows up — bounded to 60 attempts so an export that (defensively)
+// skipped the column doesn't leave a per-idle scan running for the whole session.
+// Zone X (minimal) is a mapped zone, so any populated viewport settles this quickly.
+let fzProbes = 0;
+function detectTileExtras(){
+  if(EXTRAS.land_use===false || (EXTRAS.land_use && EXTRAS.flood_zone) || fzProbes>=60) return;
+  if(!map.getSource("parcels")) return;
+  const fs = map.querySourceFeatures("parcels",{sourceLayer:"parcels"});
+  if(!fs.length) return;
+  if(EXTRAS.land_use===null){
+    EXTRAS.land_use = ("land_use" in (fs[0].properties||{}));
+    if(!EXTRAS.land_use) return;
+    buildLandUseChips();
+  }
+  fzProbes++;
+  if(!EXTRAS.flood_zone && fs.slice(0,400).some(f=>"fema_flood_zone" in (f.properties||{}))){
+    EXTRAS.flood_zone = true;
+    updateSubmode();
+    if(active==="flood") renderLegend();
+  }
+}
+map.on("idle", detectTileExtras);
 
 renderLegend();
 renderInsights();
@@ -589,20 +705,24 @@ updateSubmode();
 function ptDedupe(feats){ const seen=new Set(), out=[]; for(const f of feats){ const p=f.properties||{}; const k=(f.id!=null?f.id:(p.id||p.ll_uuid||p.parcelnumb||p.geoid||JSON.stringify(f.geometry&&f.geometry.coordinates&&(f.geometry.coordinates[0]||f.geometry.coordinates)))); if(seen.has(k))continue; seen.add(k); out.push(f);} return out; }
 function coCountScores(u, field){ const by={0:0,1:0,2:0}; u.forEach(f=>{ let v=Math.round(+((f.properties||{})[field])||0); if(v<0)v=0; if(v>2)v=2; by[v]++; }); return by; }
 function coRows(by, P){ const two=P.stops.length>2; return P.stops.slice().reverse().map(([v,c])=>{ const lab = v===0?"none":(v===2?"elevated":(two?"moderate":"elevated")); return [lab, by[v]||0, c]; }); }
+// res/com/ind split of the in-view features — null when the tiles carry no land_use.
+function luSplit(u){ const c={res:0,com:0,ind:0}; let any=false; u.forEach(f=>{ const v=(f.properties||{}).land_use; if(v!=null){ any=true; if(c[v]!=null) c[v]++; } }); return any?c:null; }
 function updatePanTally(){
   const box=document.getElementById("pantally"); if(!box||!map.isStyleLoaded()) return;
   const vis=id=> map.getLayer(id) && map.getLayoutProperty(id,"visibility")!=="none";
   const P = active!=="all" ? PERILS[active] : null;
-  let title="", rows=[];
+  let title="", rows=[], lu=null;
   try{
-    if(vis("buildings-circle")){ const u=ptDedupe(map.queryRenderedFeatures({layers:["buildings-circle"]})); if(u.length){ title=`${u.length.toLocaleString()} buildings in view`; if(P) rows=coRows(coCountScores(u,P.b),P); } }
-    if(!title && vis("parcels-fill")){ const u=ptDedupe(map.queryRenderedFeatures({layers:["parcels-fill"]})); if(u.length){ title=`${u.length.toLocaleString()} parcels in view`; if(P) rows=coRows(coCountScores(u,P.p),P); } }
+    if(vis("buildings-circle")){ const u=ptDedupe(map.queryRenderedFeatures({layers:["buildings-circle"]})); if(u.length){ title=`${u.length.toLocaleString()} buildings in view`; if(P) rows=coRows(coCountScores(u,P.b),P); lu=luSplit(u); } }
+    if(!title && vis("parcels-fill")){ const u=ptDedupe(map.queryRenderedFeatures({layers:["parcels-fill"]})); if(u.length){ title=`${u.length.toLocaleString()} parcels in view`; if(P) rows=coRows(coCountScores(u,P.p),P); lu=luSplit(u); } }
     if(!title && vis("hex-fill")){ const u=ptDedupe(map.queryRenderedFeatures({layers:["hex-fill"]})); if(u.length){ title=`${u.length.toLocaleString()} grid cells in view`; } }
   }catch(e){}
   if(!title){ box.classList.remove("show"); return; }
   const cav = P ? `${P.label} · on screen now · a floor` : "exposure in view · on screen now";
   box.classList.add("show");
-  box.innerHTML = `<b>${title}</b>` + rows.map(([l,n,c])=>`<span class="pt-sw" style="background:${c}"></span>${l} <b>${n.toLocaleString()}</b>`).join("") + `<span class="pt-cav">${cav}</span>`;
+  box.innerHTML = `<b>${title}</b>` + rows.map(([l,n,c])=>`<span class="pt-sw" style="background:${c}"></span>${l} <b>${n.toLocaleString()}</b>`).join("")
+    + (lu? `<span class="pt-lu">res <b>${lu.res.toLocaleString()}</b> · com <b>${lu.com.toLocaleString()}</b> · ind <b>${lu.ind.toLocaleString()}</b></span>` : "")
+    + `<span class="pt-cav">${cav}</span>`;
 }
 map.on("moveend", updatePanTally);
 map.on("idle", updatePanTally);
@@ -621,6 +741,7 @@ function buildingPopup(f){
   return `<div class="pp-title">Building ${scoreBadge(p[PERILS[active].b], PERILS[active].stops.length-1)}</div>
     <div class="pp-meta">${p.county||""} · ${p.usedesc||"use n/a"} · id ${(p.building_id||"").slice(0,8)}</div>
     <div class="pp-grid">
+      ${p.land_use ? row("Land use", LU_LABEL[p.land_use]||p.land_use) : ""}
       ${row("Wildfire (0–2)", num(p.wf_score))}
       ${row("Hail (0–2)", num(p.hail_score))}
       ${row("Flood (0–1)", num(p.flood_score))}
@@ -643,6 +764,8 @@ function parcelPopup(f){
   return `<div class="pp-title">Parcel ${scoreBadge(p[PERILS[active].p], PERILS[active].stops.length-1)}</div>
     <div class="pp-meta">${p.parcel_county||""} · ${p.usedesc||"use n/a"} · ${p.parcelnumb||""}</div>
     <div class="pp-grid">
+      ${p.land_use ? row("Land use", LU_LABEL[p.land_use]||p.land_use) : ""}
+      ${("fema_flood_zone" in p) ? row("FEMA zone", p.fema_flood_zone) : ""}
       ${row("Buildings on parcel", num(p.buildings))}
       ${row("Wildfire max (0–2)", num(p.wf_max))}
       ${row("Hail max (0–2)", num(p.hail_max))}

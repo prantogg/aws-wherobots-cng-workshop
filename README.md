@@ -44,6 +44,11 @@ archive, not the whole 2.3 GB buildings file.
   as "furthest," not "missing."
 - Language is risk **indicators**, not insurability determinations.
 
+- **Optional tile fields, feature-detected:** `land_use` (parcels + buildings) and
+  `fema_flood_zone` (parcels) light up the land-use chips/tally split/popup rows and
+  the flood-peril "FEMA zones" sub-mode — but only after the tiles are regenerated
+  (see `pipelines/co-risk/README.md`); with today's tiles those controls stay hidden.
+
 The H3 layer shades **building density** (its primary styling field); the peril scores
 render on parcels and buildings as you zoom in. Counts (hex 24,868 / parcels 2,720,180 /
 buildings 2,771,126) are taken from the handoffs; nothing is recomputed.
