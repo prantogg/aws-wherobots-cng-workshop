@@ -213,31 +213,42 @@ let active = "all";
 // Toggle order: "All perils" (general exposure only) first, then one peril at a time.
 const PORDER = [["all","All perils"],["wildfire","Wildfire"],["hail","Hail"],["flood","Flood"],["wind","Wind"],["access","Access"]];
 
-// ---- optional tile fields (post-regen), feature-detected — never assumed ----
-// A future tile export adds `land_use` (res/com/ind/agr/inst/vac/other/unknown, on
-// parcels AND buildings) and `fema_flood_zone` (raw zone code, parcels only). The tile
-// metadata carries no field list (vector_layers[].fields is empty), so the only probe
-// is a loaded feature: see detectTileExtras(). With today's tiles nothing is found and
-// every control below stays hidden — behavior is unchanged.
+// ---- optional tile fields, feature-detected — never assumed ----
+// The regenerated tiles (PR #13) carry `land_use` (res/com/ind/agr/inst/vac/other/unknown,
+// on parcels AND buildings), `fema_flood_zone` (raw zone code, parcels only), and
+// `flood_detail` (floodway / x500, parcels only). The tile metadata carries no field list
+// (vector_layers[].fields is empty), so the only probe is a loaded feature: see
+// detectTileExtras(). Older tiles lacked them and every control below stayed hidden; the
+// probe lights them up when present — hard-reload to bust cache after a tile republish.
 const EXTRAS = { land_use:null, flood_zone:false };   // land_use null = undecided yet
 let luFilter = "all";                                  // land-use chip state
 let floodMode = "sfha";                                // flood sub-mode: "sfha" | "zones"
 const LU_LABEL = { res:"Residential", com:"Commercial", ind:"Industrial", agr:"Agricultural",
                    inst:"Institutional", vac:"Vacant land", other:"Other", unknown:"Unknown" };
 
-// FEMA zone groups: A*-series (1% annual chance, SFHA) / V* coastal / X-B-C moderate to
-// minimal / D undetermined. Codes are exact — subtype prose is stripped at export.
+// FEMA zone groups, legend order high→low. Colorado is landlocked, so there is NO V/VE
+// coastal row (V-zones are coastal wave action — zero in CO). `flood_detail` recovers two
+// distinctions the bare zone code destroys: `floodway` (the regulatory highest-hazard core
+// of an A/AE SFHA, development barred) and `x500` (the 500-year floodplain, a zone X 0.2%
+// subtype). A NULL zone means NO STUDY was performed — it is NOT "safe" (~27% of parcels:
+// nothing recorded, FEMA "area not included", or zone D). Codes are exact.
+const FZ_UNKNOWN = "#b9a6a6";   // not a hazard class — "no study performed"
 const FZ_GROUPS = [
-  ["A / AE / AH / AO / AR / A99 — 1% annual (SFHA)", ["A","AE","AH","AO","AR","A99"], "#4575b4"],
-  ["V / VE — coastal high hazard",                   ["V","VE"],                      "#54278f"],
+  ["Floodway — regulatory, highest hazard",          ["__detail_floodway"],           "#7f0000"],
+  ["A / AE / AH / AO / AR / A99 — 1% annual (SFHA)", ["A","AE","AH","AO","AR","A99"],  "#4575b4"],
+  ["X (0.2%) — 500-year floodplain",                 ["__detail_x500"],               "#74add1"],
   ["X / B / C — moderate to minimal",                ["X","B","C"],                   "#cfe0f0"],
-  ["D — undetermined",                               ["D"],                           "#c2c8d0"],
+  ["D / not mapped — no study performed (~27%)",     ["__unknown"],                   FZ_UNKNOWN],
 ];
 function floodZoneColor(){
-  const m = ["match", ["get","fema_flood_zone"]];
-  for(const [,codes,c] of FZ_GROUPS) m.push(codes, c);
-  m.push(SAFE);                                        // unrecognised code
-  return ["case", ["has","fema_flood_zone"], m, SAFE]; // NULL zone omitted per feature
+  const byCode = ["match", ["get","fema_flood_zone"]];
+  for(const [,codes,c] of FZ_GROUPS){ if(codes[0].startsWith("__")) continue; byCode.push(codes, c); }
+  byCode.push(FZ_UNKNOWN);                              // D or unrecognised → no usable determination
+  return ["case",
+    ["==", ["get","flood_detail"], "floodway"], "#7f0000",   // floodway core of an A/AE SFHA
+    ["==", ["get","flood_detail"], "x500"],     "#74add1",   // 500-year floodplain (zone X 0.2% subtype)
+    ["has","fema_flood_zone"],                  byCode,
+    FZ_UNKNOWN];                                             // NULL zone — not studied, NOT safe
 }
 
 function colorExpr(field, stops){
@@ -443,10 +454,9 @@ function renderLegend(){
   if(active==="flood" && floodMode==="zones" && EXTRAS.flood_zone){
     document.getElementById("legend-title").textContent = "FEMA flood zone";
     document.getElementById("legend").innerHTML = FZ_GROUPS.map(([lab,,c])=>
-      `<div class="legend-row"><span class="sw" style="background:${c}"></span><span>${lab}</span></div>`).join("")
-      + `<div class="legend-row"><span class="sw" style="background:${SAFE}"></span><span>No zone on parcel</span></div>`;
+      `<div class="legend-row"><span class="sw" style="background:${c}"></span><span>${lab}</span></div>`).join("");
     document.getElementById("legend-scope").textContent =
-      "Raw FEMA zone code per parcel — a regulatory designation, not a loss model. Buildings keep the 0–1 flood score; SFHA is the default view.";
+      "Raw FEMA zone per parcel — a regulatory designation, not a loss model. Grey-brown = NO study performed (~27%), not 'safe'. Floodway and the 500-year (X 0.2%) plain are split from the bare code. Buildings keep the 0–1 flood score; SFHA is the default view.";
     return;
   }
   const P = PERILS[active];
@@ -765,7 +775,9 @@ function parcelPopup(f){
     <div class="pp-meta">${p.parcel_county||""} · ${p.usedesc||"use n/a"} · ${p.parcelnumb||""}</div>
     <div class="pp-grid">
       ${p.land_use ? row("Land use", LU_LABEL[p.land_use]||p.land_use) : ""}
-      ${("fema_flood_zone" in p) ? row("FEMA zone", p.fema_flood_zone) : ""}
+      ${("fema_flood_zone" in p)
+        ? row("FEMA zone", p.fema_flood_zone + (p.flood_detail==="floodway" ? " · floodway — highest hazard" : p.flood_detail==="x500" ? " · 500-yr (0.2%)" : ""))
+        : row("FEMA zone", "no study performed")}
       ${row("Buildings on parcel", num(p.buildings))}
       ${row("Wildfire max (0–2)", num(p.wf_max))}
       ${row("Hail max (0–2)", num(p.hail_max))}
