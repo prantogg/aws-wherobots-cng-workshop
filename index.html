@@ -56,6 +56,10 @@
   .foot.warn{background:#fff6e5;border-left:3px solid #e8912d;padding-left:8px}
   .foot{border-top:1px solid var(--line);margin-top:11px;padding-top:9px;color:var(--muted);font-size:10.8px;line-height:1.5}
   .foot b{color:var(--ink)}
+  .opacity-wrap{display:none;align-items:center;gap:7px;margin-top:6px;font-size:11px;color:var(--muted)}
+  .opacity-wrap input[type=range]{flex:1;min-width:80px;accent-color:var(--accent);height:14px}
+  .opacity-lab{font-weight:600}
+  .opacity-val{font-variant-numeric:tabular-nums;min-width:34px;text-align:right}
   .maplibregl-popup{max-width:320px!important}
   .maplibregl-popup-content{font-family:var(--font);font-size:12px;padding:12px 14px;border-radius:10px}
   .pp-title{font-weight:800;font-size:13.5px;margin-bottom:2px}
@@ -157,7 +161,8 @@
     same claim as remoteness.<br>
     · <b>Access drive time</b> is a modelled estimate in <b>5-minute bands</b> — straight-line
       distance × a terrain factor calibrated against HERE routes, not a per-building route.<br>
-    · <b>Aerial imagery is locational context only.</b> Scores are screening indicators from
+    · <b>Aerial imagery is locational context only</b>, including at partial opacity —
+      blending it under the footprints changes what you can SEE, never what was measured. Scores are screening indicators from
       modelled and tract-resolution inputs — never derived from imagery. A building shown
       under aerial is not individually assessed.
   </div>
@@ -681,6 +686,23 @@ function updateFocus(){
 (function(){
   const host = document.getElementById("basemapmode");
   const FOOT = document.getElementById("foot");
+
+  // Imagery opacity. Blending matters more than on/off here: at 100% NAIP buries the
+  // analytic layers, at 0% it is gone, and the useful reading is in between -- footprint
+  // and score over a visible roof. Default 100 so the toggle behaves as before until
+  // someone reaches for the slider.
+  const opacityWrap = document.createElement("label");
+  opacityWrap.className = "opacity-wrap";
+  opacityWrap.style.display = "none";
+  opacityWrap.innerHTML = '<span class="opacity-lab">Imagery</span>' +
+    '<input type="range" min="0" max="100" value="100" step="5" id="imagery-opacity">' +
+    '<span class="opacity-val" id="imagery-opacity-val">100%</span>';
+  host.parentNode.insertBefore(opacityWrap, host.nextSibling);
+  opacityWrap.querySelector("input").addEventListener("input", ev=>{
+    const v = +ev.target.value;
+    document.getElementById("imagery-opacity-val").textContent = v + "%";
+    if(map.getLayer("imagery")) map.setPaintProperty("imagery","raster-opacity", v/100);
+  });
   [["map","Map"],["aerial","Aerial"],["terrain","Terrain"]].forEach(([m,label],i)=>{
     const b=document.createElement("button"); b.textContent=label; b.dataset.m=m;
     if(i===0) b.className="on";
@@ -689,9 +711,18 @@ function updateFocus(){
       const vis=(id,on)=>map.getLayer(id)&&map.setLayoutProperty(id,"visibility",on?"visible":"none");
       vis("imagery", m==="aerial");
       vis("hillshade", m==="terrain");
-      // Aerial is opaque, so the CARTO base underneath is invisible but still fetched.
-      // Terrain keeps it: hillshade needs something to shade over.
-      vis("base", m==="map" || m==="terrain");
+      // Aerial is opaque at 100%, so the CARTO base underneath is invisible but still
+      // fetched. Terrain keeps it: hillshade needs something to shade over. Aerial now
+      // ALSO keeps it, because the opacity slider can make imagery translucent and
+      // blank space underneath would read as a rendering fault.
+      vis("base", true);
+      // Under aerial the building fill drops to a wash so the REAL ROOF shows through
+      // its own footprint -- an opaque 0.95 fill hides exactly what the imagery is for.
+      // The white outline stays, so a footprint still reads as a footprint.
+      if(map.getLayer("buildings-circle")){
+        map.setPaintProperty("buildings-circle","fill-opacity", m==="aerial" ? 0.45 : 0.95);
+      }
+      if(opacityWrap) opacityWrap.style.display = (m==="aerial") ? "flex" : "none";
       // Aerial makes it tempting to read a score as a statement about THAT roof. The
       // caveat is permanent in the footer; under aerial it is also highlighted, because
       // that is exactly when someone is most likely to over-read a screening score.
