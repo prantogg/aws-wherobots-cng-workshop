@@ -21,7 +21,6 @@
     padding:10px 14px;background:rgba(255,255,255,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(4px);flex-wrap:wrap}
   .topbar h1{font-size:15px;margin:0;font-weight:800;letter-spacing:-.01em}
   .topbar .sub{font-size:11.5px;color:var(--muted)}
-  .chip{font-size:10.5px;font-weight:700;color:#8a5a00;background:#fff4de;border:1px solid #f1d79b;border-radius:999px;padding:3px 8px}
   .perils{display:flex;gap:4px;background:#eef2f8;border-radius:9px;padding:3px;margin-left:auto;flex-wrap:wrap}
   .perils label{font-size:12.5px;font-weight:600;color:var(--muted);padding:5px 11px;border-radius:7px;cursor:pointer;user-select:none}
   .perils input{display:none}
@@ -54,6 +53,7 @@
   .lu-chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
   .lu-chips button{font-family:inherit;font-size:11px;font-weight:600;color:var(--muted);background:#eef2f8;border:0;border-radius:999px;padding:4px 10px;cursor:pointer}
   .lu-chips button.on{background:var(--accent);color:#fff}
+  .foot.warn{background:#fff6e5;border-left:3px solid #e8912d;padding-left:8px}
   .foot{border-top:1px solid var(--line);margin-top:11px;padding-top:9px;color:var(--muted);font-size:10.8px;line-height:1.5}
   .foot b{color:var(--ink)}
   .maplibregl-popup{max-width:320px!important}
@@ -122,12 +122,12 @@
 <div class="topbar">
   <div>
     <h1>Colorado P&amp;C Risk — Exposure Explorer</h1>
-    <div class="sub">2,771,126 buildings · 2,720,180 parcels · 24,868 H3 cells · risk <b>indicators</b>, not insurability determinations</div>
+    <div class="sub">2,771,126 buildings · 2,718,968 parcels · 24,868 H3 cells · risk <b>indicators</b>, not insurability determinations</div>
   </div>
-  <span class="chip">Working draft</span>
   <div class="perils" id="perils"></div>
   <div class="submode" id="submode" style="display:none"></div>
   <div class="submode" id="floodmode" style="display:none"></div>
+  <div class="submode" id="basemapmode"></div>
   <div class="zoom" id="zoom">Statewide</div>
 </div>
 
@@ -144,14 +144,22 @@
     <div class="legend-note">Filters parcels &amp; buildings (z10+); county/hex aggregates are unaffected.</div>
   </div>
   <div class="legend-note"><b>Zoom in to drill down:</b> counties → H3 hexes → parcels → individual buildings. Aggregates shade by the <b>selected peril's elevated share</b>, so they move with the toggle. <b>Click a county</b> to focus the panel on it.</div>
-  <div class="foot">
+  <div class="foot" id="foot">
     <b>Read before quoting.</b><br>
     · <b>yearbuilt</b> is construction year, not roof age.<br>
     · Hail is radar-detected density, not modelled severity.<br>
     · Tornado / wind / winter are tract-resolution, not per-building.<br>
     · Hazard is centroid-sampled for 98.24% of buildings.<br>
     · Assessor <b>$</b> values are popup-only reference (≈63% coverage, county-dependent); never used for styling or ranking.<br>
-    · <b>NULL</b> road/station distance = <b>furthest</b> (no station within 25 km), not missing.
+    · <b>NULL</b> road/station distance = <b>furthest</b> (no station within 25 km), not missing —
+    on a <i>building</i>, and on a parcel that has buildings. A parcel with <b>no</b> buildings
+    reads &ldquo;no building to measure&rdquo;: nothing was measured there, which is not the
+    same claim as remoteness.<br>
+    · <b>Access drive time</b> is a modelled estimate in <b>5-minute bands</b> — straight-line
+      distance × a terrain factor calibrated against HERE routes, not a per-building route.<br>
+    · <b>Aerial imagery is locational context only.</b> Scores are screening indicators from
+      modelled and tract-resolution inputs — never derived from imagery. A building shown
+      under aerial is not individually assessed.
   </div>
 </div>
 
@@ -311,12 +319,28 @@ const map = new maplibregl.Map({
   style:{
     version:8,
     sources:{
+      // USGS NAIP: ~1 m aerial, US, PUBLIC DOMAIN (no ToS friction, unlike Esri World
+      // Imagery). Shows the actual roof and the vegetation around it.
+      imagery:{ type:"raster", tileSize:256, maxzoom:19,
+        tiles:["https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPPlus/ImageServer/tile/{z}/{y}/{x}"],
+        attribution:"Imagery: USGS NAIP (public domain)" },
+      // AWS open elevation tiles (terrarium encoding) -> hillshade for real topography.
+      // Public, no key. Not our bucket, so the CORS policy on the tile bucket is not involved.
+      terrain:{ type:"raster-dem", tileSize:256, maxzoom:15, encoding:"terrarium",
+        tiles:["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+        attribution:"Elevation: Mapzen/AWS Terrain Tiles" },
       base:{ type:"raster", tileSize:256,
         tiles:["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
                "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
         attribution:"© OpenStreetMap · © CARTO · <a href='https://regrid.com' target='_blank' rel='noopener'>Parcel data: Regrid</a> · Risk data: Wherobots" }
     },
-    layers:[ { id:"base", type:"raster", source:"base" } ]
+    layers:[
+      { id:"base", type:"raster", source:"base" },
+      // Both start hidden; the Basemap control toggles them.
+      { id:"imagery", type:"raster", source:"imagery", layout:{visibility:"none"} },
+      { id:"hillshade", type:"hillshade", source:"terrain", layout:{visibility:"none"},
+        paint:{ "hillshade-exaggeration":0.45 } }
+    ]
   }
 });
 map.addControl(new maplibregl.NavigationControl({showCompass:false}), "bottom-left");
@@ -374,12 +398,13 @@ map.on("load", ()=>{
 
   // z14+: individual buildings, colored by the active peril score.
   map.addLayer({
-    id:"buildings-circle", type:"circle", source:"buildings", "source-layer":"buildings", minzoom:14,
+    // Real Overture FOOTPRINTS (the tile carries polygons, not centroids). A circle
+    // layer renders Point geometry only, so this must stay `fill`.
+    id:"buildings-circle", type:"fill", source:"buildings", "source-layer":"buildings", minzoom:14,
     paint:{
-      "circle-color":buildingCircleColor(active),
-      "circle-radius":["interpolate",["linear"],["zoom"], 14,2, 17,4.5, 19,7],
-      "circle-stroke-color":"#ffffff", "circle-stroke-width":["interpolate",["linear"],["zoom"],14,0.2,18,0.8],
-      "circle-opacity":0.95
+      "fill-color":buildingCircleColor(active),
+      "fill-outline-color":"rgba(255,255,255,0.85)",
+      "fill-opacity":0.95
     }
   });
 
@@ -424,7 +449,7 @@ function applyPeril(){
   map.setPaintProperty("county-fill","fill-color", countyFillColor(active));
   map.setPaintProperty("hex-fill","fill-color", hexFillColor(active));
   map.setPaintProperty("parcels-fill","fill-color", parcelFillColor(active));
-  map.setPaintProperty("buildings-circle","circle-color", buildingCircleColor(active));
+  map.setPaintProperty("buildings-circle","fill-color", buildingCircleColor(active));
   applyPerilFilters();
   renderLegend();
   if(typeof updatePanTally==="function") updatePanTally();
@@ -515,7 +540,7 @@ function renderInsights(){
         <span class="cval">${c.avg_score.toFixed(2)}</span></div>`).join("");
     } else {
       document.getElementById("ins-big").innerHTML = fmt(TOTAL_BUILDINGS) + ' <small>buildings</small>';
-      document.getElementById("ins-subline").textContent = "Total building exposure across Colorado (2,720,180 parcels). Toggle a peril to see its elevated share.";
+      document.getElementById("ins-subline").textContent = "Total building exposure across Colorado (2,718,968 parcels). Toggle a peril to see its elevated share.";
       document.getElementById("ins-seg").innerHTML = `<div class="fill" style="width:100%;background:${EXP_SOLID}"></div>`;
       document.getElementById("ins-meaning").textContent = "All-perils view: bars and shading show building exposure (count). Pick a peril to color the map and re-rank by that peril's elevated buildings.";
       const cs = window.COUNTIES.slice().sort((a,b)=>b.buildings-a.buildings).slice(0,12);
@@ -650,6 +675,32 @@ function updateFocus(){
 })();
 // ---- Flood sub-mode: binary SFHA (default — today's behavior) vs FEMA zone coloring.
 // The toggle only appears once the tiles carry `fema_flood_zone` (see detectTileExtras).
+// ---- Basemap: analytic map / NAIP aerial / terrain hillshade -------------
+// Imagery is LOCATIONAL CONTEXT ONLY. The peril scores are screening-grade and are not
+// derived from imagery -- see the caveat line, which changes with this toggle.
+(function(){
+  const host = document.getElementById("basemapmode");
+  const FOOT = document.getElementById("foot");
+  [["map","Map"],["aerial","Aerial"],["terrain","Terrain"]].forEach(([m,label],i)=>{
+    const b=document.createElement("button"); b.textContent=label; b.dataset.m=m;
+    if(i===0) b.className="on";
+    b.onclick=()=>{
+      [...host.children].forEach(c=>c.classList.remove("on")); b.classList.add("on");
+      const vis=(id,on)=>map.getLayer(id)&&map.setLayoutProperty(id,"visibility",on?"visible":"none");
+      vis("imagery", m==="aerial");
+      vis("hillshade", m==="terrain");
+      // Aerial is opaque, so the CARTO base underneath is invisible but still fetched.
+      // Terrain keeps it: hillshade needs something to shade over.
+      vis("base", m==="map" || m==="terrain");
+      // Aerial makes it tempting to read a score as a statement about THAT roof. The
+      // caveat is permanent in the footer; under aerial it is also highlighted, because
+      // that is exactly when someone is most likely to over-read a screening score.
+      if(FOOT) FOOT.classList.toggle("warn", m==="aerial");
+    };
+    host.appendChild(b);
+  });
+})();
+
 (function(){
   const host = document.getElementById("floodmode");
   [["sfha","SFHA"],["zones","FEMA zones"]].forEach(([m,label],i)=>{
@@ -746,6 +797,22 @@ function scoreBadge(v,dom){
 }
 function row(k,v){ return `<span class="k">${k}</span><span class="v">${v}</span>`; }
 
+function accessBand(v){
+  // NULL is "no station within 25 km" -- unknown-but-large, NEVER small. Say so.
+  // Only valid where something was actually measured: on a building, or on a parcel
+  // that HAS buildings. A zero-building parcel is NULL for a different reason
+  // entirely (nothing to measure) -- see parcelAccessRow().
+  if(v===null||v===undefined||v==="") return "beyond 25 km (furthest)";
+  return "~"+(+v)+" min (5-min band, modelled)";
+}
+function parcelAccessRow(p){
+  // NULL is overloaded on this layer. The parcels tile carries every parcel,
+  // vacant ones included, and MAX() over a parcel with no buildings is also NULL.
+  // Routing that into accessBand() would assert "beyond 25 km" about a parcel with
+  // nothing on it. Absence of a building is not evidence of remoteness.
+  if(!(+p.buildings > 0)) return row("Worst drive to station", "no building to measure");
+  return row("Worst drive to station", accessBand(p.access_road_min));
+}
 function buildingPopup(f){
   const p = f.properties;
   return `<div class="pp-title">Building ${scoreBadge(p[PERILS[active].b], PERILS[active].stops.length-1)}</div>
@@ -764,6 +831,8 @@ function buildingPopup(f){
       ${row("Year built", num(p.yearbuilt))}
       ${row("Road dist", dist(p.road_m_est))}
       ${row("Fire station", dist(p.station_m))}
+      ${row("Drive to station", accessBand(p.access_road_min))}
+      ${("height_m" in p) ? row("Height", p.height_m!=null ? num(p.height_m,1)+" m" : "not recorded") : ""}
       ${row("NRI rating", p.RISK_RATNG||"—")}
       ${row("Assessor $", usd(p.improv_val))}
     </div>
@@ -786,6 +855,7 @@ function parcelPopup(f){
       ${row("Access max (0–1)", num(p.access_max))}
       ${row("Max hail", num(p.max_hail_in,1)+" in")}
       ${row("In SFHA", (+p.in_sfha)?"yes":"no")}
+      ${parcelAccessRow(p)}
       ${row("Assessor $ (parval)", usd(p.parval))}
     </div>
     <div class="pp-cav">$ is popup-only reference (≈63% coverage, county-dependent); never used for styling or ranking.</div>`;
