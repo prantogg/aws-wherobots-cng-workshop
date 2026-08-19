@@ -11,13 +11,18 @@
 <script src="counties_geo.js"></script>
 <style>
   :root{
+  /* Real measured toolbar height. .topbar is flex-wrap:wrap with no fixed height, so
+     adding controls (the layer-opacity sliders) makes it wrap and grow. Everything
+     below it must track that, or the panels slide under the toolbar and become
+     unclickable. 64px is only the unwrapped default; JS keeps it honest. */
+  --topbar-h:64px;
     --panel:#ffffff; --ink:#14181f; --muted:#5b6472; --line:#e3e9f2; --accent:#0957c3;
     --font:"Helvetica Neue",Arial,system-ui,sans-serif;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;font-family:var(--font);color:var(--ink)}
   #map{position:absolute;inset:0}
-  .topbar{position:absolute;top:0;left:0;right:0;z-index:5;display:flex;gap:16px;align-items:center;
+  .topbar{position:absolute;top:0;left:0;right:0;z-index:7;display:flex;gap:16px;align-items:center;
     padding:10px 14px;background:rgba(255,255,255,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(4px);flex-wrap:wrap}
   .topbar h1{font-size:15px;margin:0;font-weight:800;letter-spacing:-.01em}
   .topbar .sub{font-size:11.5px;color:var(--muted)}
@@ -31,14 +36,14 @@
   .submode button{font-family:inherit;font-size:11px;font-weight:600;color:var(--muted);background:transparent;border:0;padding:5px 9px;border-radius:7px;cursor:pointer}
   .submode button.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
 
-  .panel{position:absolute;left:12px;top:64px;z-index:5;width:290px;max-height:calc(100vh - 116px);overflow:auto;
+  .panel{position:absolute;left:12px;top:var(--topbar-h);z-index:5;width:290px;max-height:calc(100vh - var(--topbar-h) - 52px);overflow:auto;
     background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:12px;padding:13px 15px;box-shadow:0 6px 20px rgba(20,40,80,.10);font-size:12px}
   .panel h2{font-size:12px;margin:0 0 8px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
   .legend-row{display:flex;align-items:center;gap:8px;margin:5px 0}
   .legend-row.filterable{cursor:pointer;border-radius:5px;margin:5px -6px;padding:2px 6px}
   .legend-row.filterable:hover{background:rgba(0,0,0,.05)}
   .legend-row.off{opacity:.4;text-decoration:line-through}
-  .pantally{position:absolute;top:70px;left:50%;transform:translateX(-50%);z-index:6;display:none;
+  .pantally{position:absolute;top:calc(var(--topbar-h) + 6px);left:50%;transform:translateX(-50%);z-index:6;display:none;
     background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:999px;padding:6px 15px;
     font-size:11.5px;color:var(--ink);box-shadow:0 6px 20px rgba(20,40,80,.14);
     white-space:nowrap;max-width:calc(100vw - 360px);overflow:hidden;text-overflow:ellipsis}
@@ -57,6 +62,8 @@
   .foot{border-top:1px solid var(--line);margin-top:11px;padding-top:9px;color:var(--muted);font-size:10.8px;line-height:1.5}
   .foot b{color:var(--ink)}
   .opacity-wrap{display:none;align-items:center;gap:7px;margin-top:6px;font-size:11px;color:var(--muted)}
+  .opacity-wrap.layer-opacity{margin-top:4px}
+  .opacity-wrap.layer-opacity .opacity-lab{min-width:56px}
   .opacity-wrap input[type=range]{flex:1;min-width:80px;accent-color:var(--accent);height:14px}
   .opacity-lab{font-weight:600}
   .opacity-val{font-variant-numeric:tabular-nums;min-width:34px;text-align:right}
@@ -69,11 +76,11 @@
   .pp-grid .v{font-variant-numeric:tabular-nums;text-align:right;font-weight:600}
   .pp-badge{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:5px;margin-left:5px}
   .pp-cav{margin-top:8px;color:var(--muted);font-size:10.5px;border-top:1px solid var(--line);padding-top:6px}
-  .err{position:absolute;left:312px;top:64px;z-index:6;background:#fff3f2;border:1px solid #e7b7b1;color:#8a2b20;
+  .err{position:absolute;left:312px;top:var(--topbar-h);z-index:6;background:#fff3f2;border:1px solid #e7b7b1;color:#8a2b20;
     font-size:11.5px;padding:8px 11px;border-radius:8px;max-width:320px;display:none}
 
   /* ---- insights / decorators panel ---- */
-  .insights{position:absolute;right:12px;top:64px;bottom:34px;z-index:5;width:328px;overflow:auto;
+  .insights{position:absolute;right:12px;top:var(--topbar-h);bottom:34px;z-index:5;width:328px;overflow:auto;
     background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:12px;padding:14px 15px;
     box-shadow:0 6px 20px rgba(20,40,80,.10);font-size:12px}
   .insights h2{font-size:12px;margin:0 0 4px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
@@ -318,17 +325,67 @@ function buildingCircleColor(k){
 const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
 
+// Keep --topbar-h equal to the toolbar's REAL height. The toolbar wraps at narrow
+// viewports, and .panel/.insights/.err pin beneath it; a stale constant here puts the
+// sidebar under the toolbar at the same z-index, where it is silently unclickable.
+(function(){
+  const bar = document.querySelector(".topbar");
+  if(!bar) return;
+  const sync = ()=> document.documentElement.style.setProperty(
+    "--topbar-h", Math.ceil(bar.getBoundingClientRect().height) + "px");
+  sync();
+  if(window.ResizeObserver) new ResizeObserver(sync).observe(bar);
+  window.addEventListener("resize", sync);
+})();
+
+// ---- layer opacity ------------------------------------------------------------
+// Each vector layer keeps its DESIGNED zoom ramp (hex fades out as parcels take over;
+// parcels fade in as you zoom past 10). A user slider must not flatten that -- it
+// MULTIPLIES the ramp, so the zoom behaviour survives at every setting and 100% is
+// exactly the original design.
+const OPACITY_BASE = {
+  hex:      ["interpolate",["linear"],["zoom"], 6.5,0.8, 11,0.6, 13,0.2],
+  parcels:  ["interpolate",["linear"],["zoom"], 10,0.15, 12,0.55, 14,0.7],
+  // buildings is a scalar, and aerial swaps it: 0.45 lets the real roof show through
+  // its own footprint, 0.95 is the opaque analytic view.
+  buildings: 0.95,
+};
+const OPACITY_FACTOR = { hex:1, parcels:1, buildings:1 };
+const LAYER_OF = { hex:"hex-fill", parcels:"parcels-fill", buildings:"buildings-circle" };
+
+function buildingBaseOpacity(mode){ return mode==="aerial" ? 0.45 : 0.95; }
+
+function opacityExpr(key){
+  const base = OPACITY_BASE[key], f = OPACITY_FACTOR[key];
+  if(f === 1) return base;                       // untouched slider = original expression
+  return ["*", base, f];
+}
+function applyOpacity(key){
+  const id = LAYER_OF[key];
+  if(map.getLayer && map.getLayer(id)) map.setPaintProperty(id, "fill-opacity", opacityExpr(key));
+}
+
 const map = new maplibregl.Map({
   container:"map",
   center:[-105.55, 39.0], zoom:6.3, minZoom:3, maxZoom:18,
   style:{
     version:8,
     sources:{
-      // USGS NAIP: ~1 m aerial, US, PUBLIC DOMAIN (no ToS friction, unlike Esri World
-      // Imagery). Shows the actual roof and the vegetation around it.
-      imagery:{ type:"raster", tileSize:256, maxzoom:19,
-        tiles:["https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPPlus/ImageServer/tile/{z}/{y}/{x}"],
-        attribution:"Imagery: USGS NAIP (public domain)" },
+      // USGS aerial, PUBLIC DOMAIN (no ToS friction, unlike Esri World Imagery). Shows
+      // the actual roof and the vegetation around it.
+      // NOTE: this was USGSNAIPPlus/ImageServer, which began returning HTTP 504 for
+      // every tile AND for its own service root -- the layer was on but drew nothing.
+      // basemap.nationalmap.gov/USGSImageryOnly is the stable public endpoint; if
+      // imagery ever goes blank again, curl one tile before touching the layer code.
+      // maxzoom:16 is the SERVICE limit, measured, not guessed: z14/15/16 return 200
+      // image/jpeg and z17+ return 404 (the metadata's maxScale 9027.98 == z16, even
+      // though it advertises LODs to 23). Declaring 19 here would blank the imagery at
+      // z17+ -- and parcel drill-in does fitBounds maxZoom:17, so a click would land
+      // straight in the dead zone. With 16 declared, MapLibre overzooms the z16 tile
+      // instead: blurrier past 16, but continuous and never blank.
+      imagery:{ type:"raster", tileSize:256, maxzoom:16,
+        tiles:["https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}"],
+        attribution:"Imagery: USGS (public domain)" },
       // AWS open elevation tiles (terrarium encoding) -> hillshade for real topography.
       // Public, no key. Not our bucket, so the CORS policy on the tile bucket is not involved.
       terrain:{ type:"raster-dem", tileSize:256, maxzoom:15, encoding:"terrarium",
@@ -383,7 +440,7 @@ map.on("load", ()=>{
     id:"hex-fill", type:"fill", source:"hex", "source-layer":"hex", minzoom:6.5, maxzoom:13,
     paint:{
       "fill-color":hexFillColor(active),
-      "fill-opacity":["interpolate",["linear"],["zoom"], 6.5,0.8, 11,0.6, 13,0.2]
+      "fill-opacity":opacityExpr("hex")
     }
   });
   map.addLayer({
@@ -396,7 +453,7 @@ map.on("load", ()=>{
     id:"parcels-fill", type:"fill", source:"parcels", "source-layer":"parcels", minzoom:10,
     paint:{
       "fill-color":parcelFillColor(active),
-      "fill-opacity":["interpolate",["linear"],["zoom"], 10,0.15, 12,0.55, 14,0.7],
+      "fill-opacity":opacityExpr("parcels"),
       "fill-outline-color":"rgba(0,0,0,0.15)"
     }
   });
@@ -409,7 +466,7 @@ map.on("load", ()=>{
     paint:{
       "fill-color":buildingCircleColor(active),
       "fill-outline-color":"rgba(255,255,255,0.85)",
-      "fill-opacity":0.95
+      "fill-opacity":opacityExpr("buildings")
     }
   });
 
@@ -680,14 +737,14 @@ function updateFocus(){
 })();
 // ---- Flood sub-mode: binary SFHA (default — today's behavior) vs FEMA zone coloring.
 // The toggle only appears once the tiles carry `fema_flood_zone` (see detectTileExtras).
-// ---- Basemap: analytic map / NAIP aerial / terrain hillshade -------------
+// ---- Basemap: analytic map / USGS aerial / terrain hillshade -------------
 // Imagery is LOCATIONAL CONTEXT ONLY. The peril scores are screening-grade and are not
 // derived from imagery -- see the caveat line, which changes with this toggle.
 (function(){
   const host = document.getElementById("basemapmode");
   const FOOT = document.getElementById("foot");
 
-  // Imagery opacity. Blending matters more than on/off here: at 100% NAIP buries the
+  // Imagery opacity. Blending matters more than on/off here: at 100% imagery buries the
   // analytic layers, at 0% it is gone, and the useful reading is in between -- footprint
   // and score over a visible roof. Default 100 so the toggle behaves as before until
   // someone reaches for the slider.
@@ -702,6 +759,26 @@ function updateFocus(){
     const v = +ev.target.value;
     document.getElementById("imagery-opacity-val").textContent = v + "%";
     if(map.getLayer("imagery")) map.setPaintProperty("imagery","raster-opacity", v/100);
+  });
+
+  // Vector-layer opacity. Always available (not just under aerial): dialing the
+  // analytic layers down is how you see the imagery or the hillshade underneath them,
+  // and each slider MULTIPLIES that layer's designed zoom ramp rather than replacing
+  // it -- 100% is exactly the original styling.
+  [["hex","Hex"],["parcels","Parcels"],["buildings","Buildings"]].forEach(([key,label])=>{
+    const w = document.createElement("label");
+    w.className = "opacity-wrap layer-opacity";
+    w.style.display = "flex";
+    w.innerHTML = `<span class="opacity-lab">${label}</span>` +
+      `<input type="range" min="0" max="100" value="100" step="5" data-k="${key}">` +
+      `<span class="opacity-val" id="op-val-${key}">100%</span>`;
+    host.parentNode.insertBefore(w, null);
+    w.querySelector("input").addEventListener("input", ev=>{
+      const v = +ev.target.value;
+      document.getElementById("op-val-"+key).textContent = v + "%";
+      OPACITY_FACTOR[key] = v/100;
+      applyOpacity(key);
+    });
   });
   [["map","Map"],["aerial","Aerial"],["terrain","Terrain"]].forEach(([m,label],i)=>{
     const b=document.createElement("button"); b.textContent=label; b.dataset.m=m;
@@ -719,9 +796,11 @@ function updateFocus(){
       // Under aerial the building fill drops to a wash so the REAL ROOF shows through
       // its own footprint -- an opaque 0.95 fill hides exactly what the imagery is for.
       // The white outline stays, so a footprint still reads as a footprint.
-      if(map.getLayer("buildings-circle")){
-        map.setPaintProperty("buildings-circle","fill-opacity", m==="aerial" ? 0.45 : 0.95);
-      }
+      // Update the BASE and re-apply through the shared model, so whatever the user
+      // set on the buildings slider survives a basemap change instead of being
+      // clobbered back to full strength.
+      OPACITY_BASE.buildings = buildingBaseOpacity(m);
+      applyOpacity("buildings");
       if(opacityWrap) opacityWrap.style.display = (m==="aerial") ? "flex" : "none";
       // Aerial makes it tempting to read a score as a statement about THAT roof. The
       // caveat is permanent in the footer; under aerial it is also highlighted, because
