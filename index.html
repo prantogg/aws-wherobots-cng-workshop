@@ -815,7 +815,13 @@ function parcelAccessRow(p){
 }
 function buildingPopup(f){
   const p = f.properties;
-  return `<div class="pp-title">Building ${scoreBadge(p[PERILS[active].b], PERILS[active].stops.length-1)}</div>
+  // "all" is NOT a key in PERILS -- it is the no-single-peril view. Unguarded,
+  // PERILS[active].b throws on the DEFAULT view, the exception escapes the click
+  // handler, and NO popup opens for buildings or parcels. Guard exactly as every
+  // other PERILS[active] call site does; with no active peril there is no score
+  // badge to show, and the per-peril rows below still carry every score.
+  const P = active!=="all" ? PERILS[active] : null;
+  return `<div class="pp-title">Building ${P ? scoreBadge(p[P.b], P.stops.length-1) : ""}</div>
     <div class="pp-meta">${p.county||""} · ${p.usedesc||"use n/a"} · id ${(p.building_id||"").slice(0,8)}</div>
     <div class="pp-grid">
       ${p.land_use ? row("Land use", LU_LABEL[p.land_use]||p.land_use) : ""}
@@ -840,7 +846,8 @@ function buildingPopup(f){
 }
 function parcelPopup(f){
   const p = f.properties;
-  return `<div class="pp-title">Parcel ${scoreBadge(p[PERILS[active].p], PERILS[active].stops.length-1)}</div>
+  const P = active!=="all" ? PERILS[active] : null;   // see buildingPopup: "all" is not a PERILS key
+  return `<div class="pp-title">Parcel ${P ? scoreBadge(p[P.p], P.stops.length-1) : ""}</div>
     <div class="pp-meta">${p.parcel_county||""} · ${p.usedesc||"use n/a"} · ${p.parcelnumb||""}</div>
     <div class="pp-grid">
       ${p.land_use ? row("Land use", LU_LABEL[p.land_use]||p.land_use) : ""}
