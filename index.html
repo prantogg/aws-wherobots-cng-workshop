@@ -346,19 +346,47 @@ maplibregl.addProtocol("pmtiles", protocol.tile);
 const OPACITY_BASE = {
   hex:      ["interpolate",["linear"],["zoom"], 6.5,0.8, 11,0.6, 13,0.2],
   parcels:  ["interpolate",["linear"],["zoom"], 10,0.15, 12,0.55, 14,0.7],
-  // buildings is a scalar, and aerial swaps it: 0.45 lets the real roof show through
-  // its own footprint, 0.95 is the opaque analytic view.
+  // Buildings are the asset of interest and stay FULL strength in every basemap mode.
+  // This used to auto-thin to 0.45 under aerial to reveal the roof; the buildings
+  // slider now does that on demand, which is better -- the automatic version dimmed
+  // the thing you most wanted to see, whether or not you had asked for it.
   buildings: 0.95,
 };
-const OPACITY_FACTOR = { hex:1, parcels:1, buildings:1 };
+// Defaults: buildings are the asset of interest, so they stay FULL strength; the
+// context layers start half-dimmed so the raster underneath is visible without
+// touching a control. Change here, not in the slider markup -- the sliders read these.
+const OPACITY_FACTOR = { hex:0.5, parcels:0.5, buildings:1 };
 const LAYER_OF = { hex:"hex-fill", parcels:"parcels-fill", buildings:"buildings-circle" };
-
-function buildingBaseOpacity(mode){ return mode==="aerial" ? 0.45 : 0.95; }
 
 function opacityExpr(key){
   const base = OPACITY_BASE[key], f = OPACITY_FACTOR[key];
   if(f === 1) return base;                       // untouched slider = original expression
-  return ["*", base, f];
+  return scaleOpacity(base, f);
+}
+
+// Scale a zoom ramp by scaling its OUTPUT STOPS, never by wrapping it.
+//
+// The obvious ["*", base, f] is INVALID and fails silently at the layer: MapLibre
+// enforces `"zoom" expression may only be used as input to a top-level "step" or
+// "interpolate" expression`, so nesting the ramp inside a multiply throws inside
+// setPaintProperty and the layer keeps its old paint. That is exactly why the hex and
+// parcel sliders did nothing while buildings (a plain scalar) worked.
+//
+// Shape: ["interpolate", ["linear"], ["zoom"], in0, out0, in1, out1, ...]
+// -> inputs at odd indices from 3, outputs at even indices from 4.
+function scaleOpacity(base, f){
+  if(typeof base === "number") return base * f;
+  // The index arithmetic below is interpolate-SPECIFIC (outputs at even indices from
+  // 4). A `step` ramp puts its outputs at different slots, and CLAUDE.md lists `step`
+  // as a legitimate zoom ramp -- so silently scaling the wrong slots is exactly the
+  // quiet-wrong-answer this whole change existed to kill. Fail loud instead.
+  if(!Array.isArray(base) || base[0] !== "interpolate"){
+    throw new Error("scaleOpacity supports interpolate ramps only, got " +
+                    JSON.stringify(base).slice(0,60) + " -- add explicit handling");
+  }
+  const out = base.slice();
+  for(let i = 4; i < out.length; i += 2) out[i] = out[i] * f;
+  return out;                                    // still a top-level interpolate
 }
 function applyOpacity(key){
   const id = LAYER_OF[key];
@@ -371,21 +399,24 @@ const map = new maplibregl.Map({
   style:{
     version:8,
     sources:{
-      // USGS aerial, PUBLIC DOMAIN (no ToS friction, unlike Esri World Imagery). Shows
-      // the actual roof and the vegetation around it.
-      // NOTE: this was USGSNAIPPlus/ImageServer, which began returning HTTP 504 for
-      // every tile AND for its own service root -- the layer was on but drew nothing.
-      // basemap.nationalmap.gov/USGSImageryOnly is the stable public endpoint; if
-      // imagery ever goes blank again, curl one tile before touching the layer code.
-      // maxzoom:16 is the SERVICE limit, measured, not guessed: z14/15/16 return 200
-      // image/jpeg and z17+ return 404 (the metadata's maxScale 9027.98 == z16, even
-      // though it advertises LODs to 23). Declaring 19 here would blank the imagery at
-      // z17+ -- and parcel drill-in does fitBounds maxZoom:17, so a click would land
-      // straight in the dead zone. With 16 declared, MapLibre overzooms the z16 tile
-      // instead: blurrier past 16, but continuous and never blank.
-      imagery:{ type:"raster", tileSize:256, maxzoom:16,
-        tiles:["https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}"],
-        attribution:"Imagery: USGS (public domain)" },
+      // Esri World Imagery. LICENSED, NOT PUBLIC DOMAIN -- owner decision 2026-08-19,
+      // taken deliberately because every NAIP endpoint is down and USGS caps too low
+      // for building-level work. Attribution below is the service's own copyrightText
+      // and is REQUIRED; do not strip it. See README "Imagery licensing".
+      //
+      // History, so nobody re-litigates this by trial and error:
+      //   USGSNAIPPlus / USGSNAIPImagery   504 on every tile AND on the service root
+      //   USDA APFO (gis.apfo.usda.gov)    unreachable
+      //   USGS ImageryOnly                 works, but 404s above z16 -- the blur
+      // If NAIP comes back, it is the preferred source: public domain and ~1 m.
+      //
+      // maxzoom:19 is MEASURED, not inherited: z16-z21 all return 200 here, and the
+      // map itself caps at zoom 18. Always curl a tile at the zoom you intend to
+      // declare -- a too-high maxzoom blanks the layer instead of overzooming it,
+      // which is how the z17 dead zone got shipped.
+      imagery:{ type:"raster", tileSize:256, maxzoom:19,
+        tiles:["https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+        attribution:"Imagery: Esri, Vantor, Earthstar Geographics, and the GIS User Community" },
       // AWS open elevation tiles (terrarium encoding) -> hillshade for real topography.
       // Public, no key. Not our bucket, so the CORS policy on the tile bucket is not involved.
       terrain:{ type:"raster-dem", tileSize:256, maxzoom:15, encoding:"terrarium",
@@ -399,7 +430,7 @@ const map = new maplibregl.Map({
     layers:[
       { id:"base", type:"raster", source:"base" },
       // Both start hidden; the Basemap control toggles them.
-      { id:"imagery", type:"raster", source:"imagery", layout:{visibility:"none"} },
+      { id:"imagery", type:"raster", source:"imagery" },   // DEFAULT basemap -- starts visible
       { id:"hillshade", type:"hillshade", source:"terrain", layout:{visibility:"none"},
         paint:{ "hillshade-exaggeration":0.45 } }
     ]
@@ -737,12 +768,13 @@ function updateFocus(){
 })();
 // ---- Flood sub-mode: binary SFHA (default — today's behavior) vs FEMA zone coloring.
 // The toggle only appears once the tiles carry `fema_flood_zone` (see detectTileExtras).
-// ---- Basemap: analytic map / USGS aerial / terrain hillshade -------------
+// ---- Basemap: analytic map / Esri aerial / terrain hillshade -------------
 // Imagery is LOCATIONAL CONTEXT ONLY. The peril scores are screening-grade and are not
 // derived from imagery -- see the caveat line, which changes with this toggle.
 (function(){
   const host = document.getElementById("basemapmode");
   const FOOT = document.getElementById("foot");
+  if(FOOT) FOOT.classList.add("warn");   // default mode is aerial -- see the toggle below
 
   // Imagery opacity. Blending matters more than on/off here: at 100% imagery buries the
   // analytic layers, at 0% it is gone, and the useful reading is in between -- footprint
@@ -750,7 +782,7 @@ function updateFocus(){
   // someone reaches for the slider.
   const opacityWrap = document.createElement("label");
   opacityWrap.className = "opacity-wrap";
-  opacityWrap.style.display = "none";
+  opacityWrap.style.display = "flex";     // aerial is the default mode, so show it
   opacityWrap.innerHTML = '<span class="opacity-lab">Imagery</span>' +
     '<input type="range" min="0" max="100" value="100" step="5" id="imagery-opacity">' +
     '<span class="opacity-val" id="imagery-opacity-val">100%</span>';
@@ -769,9 +801,10 @@ function updateFocus(){
     const w = document.createElement("label");
     w.className = "opacity-wrap layer-opacity";
     w.style.display = "flex";
+    const pct = Math.round((OPACITY_FACTOR[key] ?? 1) * 100);
     w.innerHTML = `<span class="opacity-lab">${label}</span>` +
-      `<input type="range" min="0" max="100" value="100" step="5" data-k="${key}">` +
-      `<span class="opacity-val" id="op-val-${key}">100%</span>`;
+      `<input type="range" min="0" max="100" value="${pct}" step="5" data-k="${key}">` +
+      `<span class="opacity-val" id="op-val-${key}">${pct}%</span>`;
     host.parentNode.insertBefore(w, null);
     w.querySelector("input").addEventListener("input", ev=>{
       const v = +ev.target.value;
@@ -780,7 +813,10 @@ function updateFocus(){
       applyOpacity(key);
     });
   });
-  [["map","Map"],["aerial","Aerial"],["terrain","Terrain"]].forEach(([m,label],i)=>{
+  // Aerial FIRST and pre-selected: the imagery is the more legible base for this map,
+  // and the opacity model is tuned around it (context layers at 50% so it reads
+  // through). The layer's initial visibility above must match this default.
+  [["aerial","Aerial"],["map","Map"],["terrain","Terrain"]].forEach(([m,label],i)=>{
     const b=document.createElement("button"); b.textContent=label; b.dataset.m=m;
     if(i===0) b.className="on";
     b.onclick=()=>{
@@ -793,13 +829,9 @@ function updateFocus(){
       // ALSO keeps it, because the opacity slider can make imagery translucent and
       // blank space underneath would read as a rendering fault.
       vis("base", true);
-      // Under aerial the building fill drops to a wash so the REAL ROOF shows through
-      // its own footprint -- an opaque 0.95 fill hides exactly what the imagery is for.
-      // The white outline stays, so a footprint still reads as a footprint.
-      // Update the BASE and re-apply through the shared model, so whatever the user
-      // set on the buildings slider survives a basemap change instead of being
-      // clobbered back to full strength.
-      OPACITY_BASE.buildings = buildingBaseOpacity(m);
+    // Buildings deliberately do NOT change with the basemap: they are the asset of
+    // interest and stay full strength everywhere. Dimming them to see the roof
+    // underneath is the buildings slider's job, on demand.
       applyOpacity("buildings");
       if(opacityWrap) opacityWrap.style.display = (m==="aerial") ? "flex" : "none";
       // Aerial makes it tempting to read a score as a statement about THAT roof. The
