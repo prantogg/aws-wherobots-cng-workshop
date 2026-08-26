@@ -483,7 +483,8 @@ const map = new maplibregl.Map({
       // Esri World Imagery. LICENSED, NOT PUBLIC DOMAIN -- owner decision 2026-08-19,
       // taken deliberately because every NAIP endpoint is down and USGS caps too low
       // for building-level work. Attribution below is the service's own copyrightText
-      // and is REQUIRED; do not strip it. See README "Imagery licensing".
+      // and is REQUIRED; do not strip it. See pipelines/co-risk/README.md "Imagery licensing"
+      // (that section is in the PIPELINE readme, not this app's).
       //
       // History, so nobody re-litigates this by trial and error:
       //   USGSNAIPPlus / USGSNAIPImagery   504 on every tile AND on the service root
@@ -503,10 +504,30 @@ const map = new maplibregl.Map({
       terrain:{ type:"raster-dem", tileSize:256, maxzoom:15, encoding:"terrarium",
         tiles:["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
         attribution:"Elevation: Mapzen/AWS Terrain Tiles" },
-      base:{ type:"raster", tileSize:256,
-        tiles:["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-               "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
-        attribution:"© OpenStreetMap · © CARTO · <a href='https://regrid.com' target='_blank' rel='noopener'>Parcel data: Regrid</a> · Risk data: Wherobots" }
+      // CARTO dropped 2026-08-26: basemaps.cartocdn.com now stamps "API key required" INTO the
+      // tile image while still returning 200 image/png, so it never fails loudly -- the map
+      // just renders the demand.
+      //
+      // Replaced with Esri Canvas Light Gray, NOT a keyless vector style, and that is a
+      // deliberate licensing choice the owner made (2026-08-26): `base` must stay a SINGLE
+      // toggleable raster layer beneath the imagery/hillshade stack, which a 55-layer vector
+      // style cannot be without rebuilding the Basemap control. Consequence to be aware of:
+      // Esri is no longer only the optional aerial toggle, it is now the MANDATORY basemap, so
+      // all base tile traffic goes to a licensed service.
+      // See pipelines/co-risk/README.md "Basemap licensing" -- that section carries THIS
+      // layer's copyrightText and the maxzoom-16 measurement. ("Imagery licensing", cited
+      // above, covers the aerial World Imagery source only.)
+      //
+      // attribution is the service root's own copyrightText, fetched verbatim from
+      // .../World_Light_Gray_Base/MapServer?f=json -- not a hand-written label. Do not reword.
+      //
+      // maxzoom:16 is MEASURED, same discipline as the imagery source above: z14 and z16
+      // return real tiles (13.9 KB / 12.2 KB) but z17, z18 and z19 all return the SAME
+      // 2,521-byte placeholder (identical sha), i.e. another silent dead zone. Declaring 16
+      // lets MapLibre overzoom real pixels instead of fetching blanks up to the map's z18 cap.
+      base:{ type:"raster", tileSize:256, maxzoom:16,
+        tiles:["https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
+        attribution:"Basemap: Esri, HERE, Garmin, (c) OpenStreetMap contributors, and the GIS user community · <a href='https://regrid.com' target='_blank' rel='noopener'>Parcel data: Regrid</a> · Risk data: Wherobots" }
     },
     layers:[
       { id:"base", type:"raster", source:"base" },
@@ -905,10 +926,10 @@ function updateFocus(){
       const vis=(id,on)=>map.getLayer(id)&&map.setLayoutProperty(id,"visibility",on?"visible":"none");
       vis("imagery", m==="aerial");
       vis("hillshade", m==="terrain");
-      // Aerial is opaque at 100%, so the CARTO base underneath is invisible but still
-      // fetched. Terrain keeps it: hillshade needs something to shade over. Aerial now
-      // ALSO keeps it, because the opacity slider can make imagery translucent and
-      // blank space underneath would read as a rendering fault.
+      // Aerial is opaque at 100%, so the base underneath (Esri Canvas since 2026-08-26,
+      // formerly CARTO) is invisible but still fetched. Terrain keeps it: hillshade needs
+      // something to shade over. Aerial now ALSO keeps it, because the opacity slider can
+      // make imagery translucent and blank space underneath would read as a rendering fault.
       vis("base", true);
     // Buildings deliberately do NOT change with the basemap: they are the asset of
     // interest and stay full strength everywhere. Dimming them to see the roof
