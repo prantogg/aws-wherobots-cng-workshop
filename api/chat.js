@@ -33,7 +33,26 @@ function rateCheck(ip){
   return { limited:false };
 }
 
+// Origins allowed to call this function cross-origin: the marketing site embed. The response
+// echoes the request Origin rather than sending "*", because this endpoint fronts an API key --
+// "*" would let any page on the internet spend it. Vary: Origin keeps caches from serving one
+// origin's ACAO to another.
+const EMBED_ORIGINS = new Set(["https://wherobots.com", "https://www.wherobots.com"]);
+
 export default async function handler(req, res){
+  // CORS must come before the POST check: a preflight is OPTIONS, and answering it with 405
+  // fails the whole cross-origin call. Same-origin requests on Vercel send no Origin and are
+  // untouched by any of this.
+  const origin = req.headers.origin;
+  const embedAllowed = typeof origin === "string" && EMBED_ORIGINS.has(origin);
+  if(embedAllowed){
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "content-type");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+  if(req.method === "OPTIONS"){ res.status(embedAllowed ? 204 : 403).end(); return; }
   if(req.method !== "POST"){ res.status(405).json({error:"POST only"}); return; }
   const key = process.env.ANTHROPIC_API_KEY;
   if(!key){ res.status(500).json({error:"ANTHROPIC_API_KEY is not set on this deployment."}); return; }

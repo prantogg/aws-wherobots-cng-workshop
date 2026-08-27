@@ -1231,12 +1231,24 @@ function copBubble(role, text){ const d=document.createElement("div"); d.classNa
 let copThinkEl=null;
 function copThink(on, text){ if(on){ if(!copThinkEl){ copThinkEl=copBubble("assistant",text||"Thinking…"); copThinkEl.classList.add("thinking"); } else { copThinkEl.textContent=text||"Thinking…"; } cop.list.scrollTop=cop.list.scrollHeight; } else if(copThinkEl){ copThinkEl.remove(); copThinkEl=null; } }
 const TOOL_LABEL={ set_peril:i=>"Switching to "+(i.peril==="all"?"all perils":i.peril), set_all_mode:i=>"Switching to "+i.mode+" view", fly_to_county:i=>"Flying to "+i.county, focus_county:i=>"Focusing "+i.county, clear_focus:()=>"Clearing focus", fit_colorado:()=>"Zooming to Colorado", get_map_state:()=>"Checking the map", find_hexes:i=>"Finding worst "+(i.peril==="all"?"":i.peril+" ")+"cells"+(i.county?" in "+i.county:" statewide"), clear_hex_highlight:()=>"Clearing highlights" };
+// The copilot function lives on Vercel and holds ANTHROPIC_API_KEY server-side. When this page
+// is embedded on another origin (wherobots.com/solutions/...), a RELATIVE "/api/chat" resolves
+// to the embedding host, which has no such function -- so target the Vercel deployment
+// absolutely there. Stay relative when we are already on Vercel (preview URLs included) or on
+// localhost, so `vercel dev` keeps working unchanged and no request leaves the machine.
+// Detected at runtime: one build serves both hosts.
+const ON_APP_ORIGIN = (() => {
+  const h = (location.hostname || "").toLowerCase();
+  return /(^|\.)vercel\.app$/.test(h) ||
+         h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+})();
+const CHAT_ENDPOINT = ON_APP_ORIGIN ? "/api/chat" : "https://co-risk-app.vercel.app/api/chat";
 async function copRun(){
   for(let round=0; round<6; round++){
     copThink(true, "Thinking…");
     let data;
     try{
-      const r = await fetch("/api/chat",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({messages:copMsgs})});
+      const r = await fetch(CHAT_ENDPOINT,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({messages:copMsgs})});
       data = await r.json();
       if(!r.ok){ copThink(false); copBubble("assistant","⚠ "+(data && data.error ? data.error : ("error "+r.status))); return; }
     }catch(e){ copThink(false); copBubble("assistant","⚠ Couldn't reach the copilot service. Try again in a moment."); return; }
