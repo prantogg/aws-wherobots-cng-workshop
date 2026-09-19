@@ -547,6 +547,21 @@ function dist(v){
 function num(v,dp){ return (v===null||v===undefined||v==="") ? "—" : (dp!=null? (+v).toFixed(dp) : (+v).toLocaleString()); }
 function usd(v){ return (v===null||v===undefined||v===""||+v===0) ? "not published" : "$"+(+v).toLocaleString(); }
 
+// Parse a deep-link query string into validated map params. Pure and extractable, so it is unit
+// tested in tests/test_deeplink_params.js. Number() (not parseFloat) rejects trailing garbage like
+// "39.6oops"; lat/lon are returned only together and in range; zoom is clamped to the map's 3-18.
+function parseDeepLink(search){
+  const q = new URLSearchParams(search || "");
+  const coordNum = (v)=>{ if(v===null || v.trim()==="") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
+  const lat = coordNum(q.get("lat"));
+  const lon = coordNum(q.get("lon")) ?? coordNum(q.get("lng"));
+  const inRange = lat!==null && lon!==null && lat>=-90 && lat<=90 && lon>=-180 && lon<=180;
+  let zoom = coordNum(q.get("zoom")) ?? coordNum(q.get("z"));
+  if(zoom!==null) zoom = Math.min(Math.max(zoom, 3), 18);
+  const peril = (q.get("peril")||"").toLowerCase().trim() || null;
+  return { lat: inRange ? lat : null, lon: inRange ? lon : null, zoom, peril };
+}
+
 map.on("load", ()=>{
   map.addSource("hex",       { type:"vector", url:"pmtiles://"+TILES_BASE+FILES.hex });
   map.addSource("parcels",   { type:"vector", url:"pmtiles://"+TILES_BASE+FILES.parcels });
@@ -618,6 +633,20 @@ map.on("load", ()=>{
 
   wireInteractions();
   detectTileErrors();
+
+  // Deep link: ?lat=&lon=&zoom=&peril= centers the map on a specific asset (e.g. one building),
+  // so it can be linked directly from a deck, doc, or the copilot. Parsing/validation lives in the
+  // pure parseDeepLink() (tested in tests/test_deeplink_params.js); this only applies the result.
+  // Kept at the END of this load handler so sources/layers already exist (no listener-ordering
+  // assumption). Existing ?panels handling is elsewhere and untouched.
+  (function(){
+    const dl = parseDeepLink(location.search);
+    if(dl.peril){
+      const input = [...document.querySelectorAll('#perils input[name="peril"]')].find(i=>i.value===dl.peril);
+      if(input) input.closest("label").click(); // reuses the peril toggle's own side effects
+    }
+    if(dl.lat!==null && dl.lon!==null) map.jumpTo({ center:[dl.lon,dl.lat], zoom: dl.zoom!==null ? dl.zoom : 16 });
+  })();
 });
 
 // ---- clickable legend filtering (single-peril score bands on the fine layers) ----
