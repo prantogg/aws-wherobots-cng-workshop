@@ -57,3 +57,39 @@ buildings 2,771,126) are taken from the handoffs; nothing is recomputed.
 
 Deploy the single `index.html` to Vercel (its `*.vercel.app` origin is already in the
 bucket's CORS allow-list) — no other hosting needed.
+
+## "Ask the data" (phases 2 and 3, not wired into the map yet)
+
+[`ASK_THE_DATA_PLAN.md`](ASK_THE_DATA_PLAN.md) is the reviewed plan for answering questions the
+copilot cannot answer from tiles, such as "the top 10 properties at risk within 10 miles of
+downtown Denver", by running spatial SQL in the browser over a lean GeoParquet extract.
+
+`query/` holds the phase-3 spike: the validator, the H3 partition prefilter, the county file
+selection, the SQL builder and the file-to-relation bridge, plus a harness page that reports the
+gate's acceptance criteria. **`index.html` is untouched by it.** The engine is not loaded by the
+map, and no `?q=` query link is honoured yet, because the gate has not been passed.
+
+| file | what it is |
+| --- | --- |
+| [`query/SPIKE_FINDINGS.md`](query/SPIKE_FINDINGS.md) | **the GO/NO-GO call**, the blockers, and how to re-run the gate |
+| `query/validate.js` | the one allowlist-and-clamp validator, shared by the agent tool and `?q=` links |
+| `query/h3cover.js` | H3 resolution selector and the conservative covering set |
+| `query/registry.js` | which county part files a query touches, and version pinning |
+| `query/sqlbuild.js` | the SQL template and the `co_risk_query` identifier substitution |
+| `query/engine.js`, `query/spike-worker.js` | the SedonaDB-WASM seam |
+| `query/fetch-count.js` | byte accounting for the engine's fetches, so the read budget is measured |
+| `query/h3-node.js` | resolves the pinned h3-js build for the Node guards, so both sides run one build |
+| `query/spike.html` | the harness: PASS / FAIL / **BLOCKED** per acceptance criterion |
+| `query/probe_prereqs.mjs` | the live bucket check to re-run before re-opening the gate |
+
+```bash
+cd apps/co-risk-app && python3 -m http.server 8080   # then /query/spike.html
+pipelines/co-risk/tests/run_all.sh                   # the four suites behind it
+```
+
+h3-js is pinned (version, URL and sha256 in `query/h3cover.js`, checked by the validator suite).
+The browser loads it from the CDN with a subresource-integrity hash, like MapLibre and pmtiles;
+`pipelines/co-risk/tests/fetch_h3.sh` caches that same file for the Node guards, and `run_all.sh`
+skips those two suites loudly when there is no network rather than failing for the wrong reason.
+
+Serve on **8080 or 8090**: the bucket's CORS does not cover Vite's 5173.
