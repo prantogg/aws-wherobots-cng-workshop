@@ -58,38 +58,49 @@ buildings 2,771,126) are taken from the handoffs; nothing is recomputed.
 Deploy the single `index.html` to Vercel (its `*.vercel.app` origin is already in the
 bucket's CORS allow-list) — no other hosting needed.
 
-## "Ask the data" (phases 2 and 3, not wired into the map yet)
+## "Ask the data": spatial SQL in the browser
 
-[`ASK_THE_DATA_PLAN.md`](ASK_THE_DATA_PLAN.md) is the reviewed plan for answering questions the
-copilot cannot answer from tiles, such as "the top 10 properties at risk within 10 miles of
-downtown Denver", by running spatial SQL in the browser over a lean GeoParquet extract.
+[`ASK_THE_DATA_PLAN.md`](ASK_THE_DATA_PLAN.md) is the reviewed plan; **the gate passed** and the
+feature is wired into the copilot. Ask it *"what are the top 10 properties at risk within 10
+miles of downtown Denver?"* and it geocodes the place, runs real spatial SQL over the full
+scored-building extract **in your browser**, draws the answer on the map and lists it in a panel.
+No query backend, no credentials, no warm cloud session.
 
-`query/` holds the phase-3 spike: the validator, the H3 partition prefilter, the county file
-selection, the SQL builder and the file-to-relation bridge, plus a harness page that reports the
-gate's acceptance criteria. **`index.html` is untouched by it.** The engine is not loaded by the
-map, and no `?q=` query link is honoured yet, because the gate has not been passed.
+The engine is [CereusDB](https://github.com/tobilg/cereusdb) (Apache SedonaDB compiled to WASM,
+Apache-2.0), pinned to an exact version and loaded from a CDN **lazily, on the first data
+question**. Everything else on this map works whether or not it ever loads.
 
 | file | what it is |
 | --- | --- |
-| [`query/SPIKE_FINDINGS.md`](query/SPIKE_FINDINGS.md) | **the GO/NO-GO call**, the blockers, and how to re-run the gate |
+| [`query/SPIKE_FINDINGS.md`](query/SPIKE_FINDINGS.md) | the gate result, the engine's sharp edges, and what is still unverified |
 | `query/validate.js` | the one allowlist-and-clamp validator, shared by the agent tool and `?q=` links |
 | `query/h3cover.js` | H3 resolution selector and the conservative covering set |
 | `query/registry.js` | which county part files a query touches, and version pinning |
 | `query/sqlbuild.js` | the SQL template and the `co_risk_query` identifier substitution |
-| `query/engine.js`, `query/spike-worker.js` | the SedonaDB-WASM seam |
-| `query/fetch-count.js` | byte accounting for the engine's fetches, so the read budget is measured |
-| `query/h3-node.js` | resolves the pinned h3-js build for the Node guards, so both sides run one build |
-| `query/spike.html` | the harness: PASS / FAIL / **BLOCKED** per acceptance criterion |
-| `query/probe_prereqs.mjs` | the live bucket check to re-run before re-opening the gate |
+| `query/gazetteer.js` | Colorado-only place lookup; unknown places are rejected, never approximated |
+| `query/engine.js` | the CereusDB seam: lazy load, per-file registration, engine-death recovery |
+| `query/executor.js` | validate to rows, including the exact geodesic radius |
+| `query/probe_prereqs.mjs` | live check that the published extract is usable |
+
+Three things in here are not obvious and will bite anyone who changes them:
+
+- **The object store is registered at the ORIGIN, never at a path prefix.** A prefix makes the
+  fetch miss, and the miss enters a retry path that calls `Instant::now()`, which panics on wasm
+  and kills the engine instance outright.
+- **The geometry column needs `ST_SetSRID(ST_GeomFromWKB(...), 5070)`.** The engine does not read
+  GeoParquet metadata, so the column arrives as plain binary, and it compares CRS before geometry.
+- **EPSG:5070 is equal-area, so a planar radius is wrong by about 0.8%.** The SQL predicate is
+  deliberately inflated past that and the exact radius is applied geodesically in the executor,
+  so a "within 10 miles" answer never silently drops a building that is inside it.
 
 ```bash
-cd apps/co-risk-app && python3 -m http.server 8080   # then /query/spike.html
-pipelines/co-risk/tests/run_all.sh                   # the four suites behind it
+cd apps/co-risk-app && python3 -m http.server 8080   # the app
+pipelines/co-risk/tests/run_all.sh                   # the suites behind it
 ```
 
 h3-js is pinned (version, URL and sha256 in `query/h3cover.js`, checked by the validator suite).
 The browser loads it from the CDN with a subresource-integrity hash, like MapLibre and pmtiles;
 `pipelines/co-risk/tests/fetch_h3.sh` caches that same file for the Node guards, and `run_all.sh`
-skips those two suites loudly when there is no network rather than failing for the wrong reason.
+skips those suites loudly when there is no network rather than failing for the wrong reason.
 
 Serve on **8080 or 8090**: the bucket's CORS does not cover Vite's 5173.

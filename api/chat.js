@@ -39,6 +39,38 @@ function rateCheck(ip){
 // origin's ACAO to another.
 const EMBED_ORIGINS = new Set(["https://wherobots.com", "https://www.wherobots.com"]);
 
+// ---- "Ask the data": building-level questions -------------------------------------------
+// Declared separately and appended, rather than edited into SYSTEM and TOOLS above. Those are
+// each a single ~13 KB line, so touching them rewrites the whole line into every diff; keeping
+// this additive also makes the new capability readable as one block instead of buried mid-line.
+//
+// The SCHEMAS live here because the model turn needs them. The EXECUTION lives in the browser
+// (apps/co-risk-app/query/), because that is the only side that can run the WASM engine. This
+// function never builds SQL and never touches the extract.
+const ASK_THE_DATA_GUIDANCE = "\n\nASKING THE DATA (building-level questions): the county table and find_hexes are AGGREGATES. For a question about individual buildings near a place -- 'top 10 properties at risk within 10 miles of downtown Denver', 'worst buildings near Boulder' -- call geocode then query_properties. That runs real spatial SQL over the full building dataset in the browser and draws the answer on the map. Report ONLY the rows it returns. Each row is a SCREENING score sampled at the building centroid, several perils are INHERITED from coarser resolution, and access_score is a 0/1 cohort flag rather than a measurement -- say so rather than calling them 'the riskiest properties'. If the tool returns notices (a clamped radius, a retired data version), tell the user. Never call query_properties for a whole county or the state; that is what the county table is for.";
+
+const QUERY_TOOLS = [
+  { name: "geocode",
+    description: "Resolve a Colorado place name (city, landmark, or 'downtown X') to a lon/lat. Colorado only -- this map has no data outside the state. Call this first, then pass the returned coordinates to query_properties.",
+    input_schema: { type: "object", properties: {
+      place: { type: "string", description: "A Colorado place, e.g. 'downtown Denver', 'Boulder', 'Colorado Springs'." }
+    }, required: ["place"] } },
+  { name: "query_properties",
+    description: "Run a real spatial SQL query over the full scored-building dataset in the browser and return the top N buildings within a radius of a point, ranked by one peril score or the composite. Use this for 'top N at risk within X miles of PLACE' -- the county table and find_hexes CANNOT answer that, because it needs a global rank over individual buildings. Results are drawn on the map and listed in a panel automatically. Geocode the place first.",
+    input_schema: { type: "object", properties: {
+      lon: { type: "number", description: "Longitude of the centre, from geocode." },
+      lat: { type: "number", description: "Latitude of the centre, from geocode." },
+      radius_m: { type: "number", description: "Search radius in METRES (10 miles = 16093.4). Values above 80000 are clamped." },
+      metric: { type: "string", enum: ["composite", "wf_score", "hail_score", "flood_score", "wind_score", "access_score"],
+                description: "What to rank by. 'composite' is the 0-7 screening sum." },
+      limit: { type: "integer", description: "How many buildings to return (1-50)." },
+      place_label: { type: "string", description: "Human label for the centre, e.g. 'downtown Denver', used in the results panel." }
+    }, required: ["lon", "lat", "radius_m"] } }
+];
+
+const ALL_TOOLS = TOOLS.concat(QUERY_TOOLS);
+const FULL_SYSTEM = SYSTEM + ASK_THE_DATA_GUIDANCE;
+
 export default async function handler(req, res){
   // CORS must come before the POST check: a preflight is OPTIONS, and answering it with 405
   // fails the whole cross-origin call. Same-origin requests on Vercel send no Origin and are
@@ -71,8 +103,8 @@ export default async function handler(req, res){
       headers:{ "content-type":"application/json", "x-api-key":key, "anthropic-version":"2023-06-01" },
       body: JSON.stringify({
         model: MODEL, max_tokens: 1024,
-        system: [{ type:"text", text: SYSTEM, cache_control:{ type:"ephemeral" } }],
-        tools: TOOLS,
+        system: [{ type:"text", text: FULL_SYSTEM, cache_control:{ type:"ephemeral" } }],
+        tools: ALL_TOOLS,
         messages
       })
     });

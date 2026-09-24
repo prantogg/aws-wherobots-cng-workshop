@@ -9,6 +9,19 @@
 <script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
 <script src="counties.js"></script>
 <script src="counties_geo.js"></script>
+<!-- "Ask the data": spatial SQL in the browser over the GeoParquet extract. Plain scripts, no
+     build step. h3-js is pinned (version, URL and sha256 live in query/h3cover.js) and the
+     engine itself is loaded lazily, only when someone actually asks a data question. -->
+<script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"
+        integrity="sha256-CHDZTeOFA732tj3OjEgSpC3ENWXxWuNWlK7fT5fq9Ug="
+        crossorigin="anonymous"></script>
+<script src="query/validate.js"></script>
+<script src="query/h3cover.js"></script>
+<script src="query/registry.js"></script>
+<script src="query/sqlbuild.js"></script>
+<script src="query/gazetteer.js"></script>
+<script src="query/engine.js"></script>
+<script src="query/executor.js"></script>
 <style>
   :root{
   /* Real measured toolbar height. .topbar is flex-wrap:wrap with no fixed height, so
@@ -138,6 +151,36 @@
   .focus-grid{display:grid;grid-template-columns:1fr auto;gap:2px 10px;margin-top:6px;font-size:11.5px}
   .focus-grid .k{color:var(--muted)} .focus-grid .v{font-variant-numeric:tabular-nums;font-weight:600}
   .focus-grid .kact{color:var(--accent)!important}
+
+/* "Ask the data" results panel. Bottom-left so it never covers the copilot (right) or the
+   layer panel (top-left), and capped in height so a 50-row answer cannot run off screen. */
+#qpanel{position:absolute;left:12px;bottom:12px;z-index:5;width:340px;max-height:52vh;
+  overflow:auto;background:rgba(17,19,24,.94);color:#e9edf2;border:1px solid #2a2f3a;
+  border-radius:10px;padding:10px 12px;font:12px/1.45 system-ui,-apple-system,sans-serif;
+  box-shadow:0 8px 28px rgba(0,0,0,.45)}
+#qpanel .qp-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#qpanel .qp-head b{font-size:13px}
+#qpanel #qp-x{background:none;border:0;color:#8b95a5;font-size:18px;line-height:1;cursor:pointer}
+#qpanel #qp-x:hover{color:#e9edf2}
+#qpanel .qp-sub{color:#9aa4b2;margin:2px 0 8px}
+#qpanel .qp-warn{background:#3a2d12;border-left:3px solid #d9a400;padding:6px 8px;
+  margin:0 0 8px;border-radius:3px;color:#f0e2c0}
+#qpanel .qp-t{width:100%;border-collapse:collapse}
+#qpanel .qp-t th{text-align:left;color:#8b95a5;font-weight:600;border-bottom:1px solid #2a2f3a;
+  padding:3px 4px}
+#qpanel .qp-t td{border-bottom:1px solid #1d222b;padding:4px 4px;vertical-align:top}
+#qpanel .qr-n{color:#7ef9ff;font-weight:700;width:18px}
+#qpanel .qr-sub{color:#8b95a5}
+#qpanel .qr-sc{font-weight:700;text-align:center}
+#qpanel .qr-pk{color:#9aa4b2;font-variant-numeric:tabular-nums}
+#qpanel code{font-size:11px;color:#cfd6e0}
+#qpanel .qp-note{color:#8b95a5;margin-top:8px;font-size:11px}
+#qpanel .qp-link{margin-top:6px}
+#qpanel .qp-link a{color:#7ef9ff}
+.qres-pin{width:20px;height:20px;border-radius:50%;background:#7ef9ff;color:#00232b;
+  font:700 11px/20px system-ui,-apple-system,sans-serif;text-align:center;cursor:default;
+  border:1.5px solid #00232b;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+@media (max-width:720px){#qpanel{width:auto;right:12px;max-height:42vh}}
 </style>
 </head>
 <body>
@@ -628,6 +671,25 @@ map.on("load", ()=>{
       "circle-stroke-color":"#c026d3", "circle-stroke-width":2.2, "circle-stroke-opacity":0.95
     }
   });
+  // "Ask the data" results: the buildings a spatial-SQL query returned. Drawn ABOVE the hex
+  // highlight, because a query answer is the most specific thing on the map and must not sit
+  // under a cell marker. Rank labels make the ordered list and the map legible as one thing.
+  map.addSource("qres", { type:"geojson", data:{type:"FeatureCollection",features:[]} });
+  map.addLayer({
+    id:"qres-halo", type:"circle", source:"qres",
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"], 8,7, 11,12, 14,20],
+      "circle-color":"#00e5ff", "circle-opacity":0.22,
+      "circle-stroke-color":"#00e5ff", "circle-stroke-width":2, "circle-stroke-opacity":0.9
+    }
+  });
+  // ⚠️ RANK NUMBERS ARE DOM MARKERS, NOT A SYMBOL LAYER. This style has no `glyphs` endpoint
+  // (the basemap is raster), and MapLibre rejects any layer using `text-field` without one:
+  // "use of \"text-field\" requires a style \"glyphs\" property". The layer is dropped, the
+  // labels never draw, and the only trace is a console error -- which is exactly how the dead
+  // opacity sliders shipped once before. Adding a glyphs endpoint would mean another
+  // third-party font dependency on a map that is deliberate about what it loads, so the
+  // numbers are plain DOM instead.
   // Load the 24,868-cell H3 rollup for the copilot's hex tools (queried in-browser, never sent to the LLM).
   fetch("hexes.json").then(r=>r.json()).then(d=>{ window.HEXES=d; }).catch(()=>{});
 
@@ -646,6 +708,32 @@ map.on("load", ()=>{
       if(input) input.closest("label").click(); // reuses the peril toggle's own side effects
     }
     if(dl.lat!==null && dl.lon!==null) map.jumpTo({ center:[dl.lon,dl.lat], zoom: dl.zoom!==null ? dl.zoom : 16 });
+
+    // A ?q= link carries the QUERY, not just the camera, so it is re-run on load against the
+    // version it was shared with. Every parameter goes through the SAME validator as an agent
+    // tool call: the URL is an input to the query, never a way around it. A plain
+    // ?lat/lon/zoom link stays viewport-only and never triggers this.
+    const ql = CoRiskQuery.validate.parseQueryLink(location.search);
+    if(ql.isQueryLink){
+      if(!ql.result.ok){
+        showQueryNotice("That shared link could not be used: " + ql.result.errors.join(" ") +
+                        " Showing the map without it.");
+      } else {
+        showQueryNotice("Re-running the shared query…");
+        (async ()=>{
+          try{
+            const eng = await loadQueryEngine();
+            const res = await CoRiskQuery.executor.run(ql.result.value, {engine:eng});
+            copThink(false);
+            if(res.ok) renderQueryResults(res, null);
+            else showQueryNotice("That shared link could not be run: " + res.errors.join(" "));
+          }catch(e){
+            copThink(false);
+            showQueryNotice("That shared link could not be run: " + (e && e.message || e));
+          }
+        })();
+      }
+    }
   })();
 });
 
@@ -1242,8 +1330,143 @@ const mapTools = {
     if(move) highlightHexes(top);
     return { peril:isAll?"composite":peril, county:cname, cells_matched:ranked.length, showing:top.length, hexes:top };
   },
-  clear_hex_highlight: ()=>{ const s=map.getSource("hexhl"); if(s) s.setData({type:"FeatureCollection",features:[]}); return {ok:true}; }
+  clear_hex_highlight: ()=>{ const s=map.getSource("hexhl"); if(s) s.setData({type:"FeatureCollection",features:[]}); return {ok:true}; },
+
+  // --- "Ask the data" ------------------------------------------------------------------
+  // The model fills typed arguments; SQL construction and every clamp live in query/, never
+  // here and never in the prompt.
+  geocode: ({place})=>{
+    const g = CoRiskQuery.gazetteer.geocode(place);
+    if(!g.ok) return {error:g.error};
+    return {place:g.name, lon:g.center.lon, lat:g.center.lat,
+            note:"Colorado gazetteer. Pass these exact coordinates to query_properties."};
+  },
+
+  query_properties: async ({lon, lat, radius_m, metric="composite", limit=10, place_label})=>{
+    const eng = await loadQueryEngine();
+    const res = await CoRiskQuery.executor.run(
+      {center:{lon, lat}, radius_m, metric, limit}, {engine:eng});
+    if(!res.ok) return {error:res.errors.join(" ")};
+    renderQueryResults(res, place_label);
+    // The model gets the rows AND the provenance, so its summary carries the grain and the
+    // modelled/inherited caveats instead of inventing confident prose about "riskiest homes".
+    return {
+      matched:res.rows.length, radius_m:res.radius_m, metric:res.metric,
+      data_version:res.version, counties:res.counties,
+      notices:res.notices, disclosure:res.disclosure, empty:res.empty,
+      rows:res.rows.map(r=>({building_id:r.building_id, county:r.county, composite:r.composite,
+        wf:r.wf_score, hail:r.hail_score, flood:r.flood_score, wind:r.wind_score,
+        access:r.access_score, dist_m:r.dist_m}))
+    };
+  }
 };
+
+// The engine is ~6 MB brotli, so it loads on the FIRST data question and never on page load.
+// Everything else on this map keeps working whether or not it ever loads.
+let _engine = null;
+async function loadQueryEngine(){
+  if(_engine && !_engine.dead) return _engine;
+  copThink(true, "Loading the query engine (first question only)…");
+  _engine = await CoRiskQuery.engine.load({ onProgress:(m)=>copThink(true, m+"…") });
+  return _engine;
+}
+
+// Results become a map layer AND a ranked panel. Both, always: a list with no markers is hard
+// to place, and markers with no list hide the scores the ranking is built on.
+let _qMarkers = [];
+function clearQueryMarkers(){ _qMarkers.forEach(m=>m.remove()); _qMarkers = []; }
+
+function renderQueryResults(res, placeLabel){
+  const src = map.getSource("qres");
+  if(src) src.setData({ type:"FeatureCollection", features:res.rows.map((r,i)=>({
+    type:"Feature", geometry:{type:"Point", coordinates:[r.lon, r.lat]},
+    properties:{rank:String(i+1), building_id:r.building_id, composite:r.composite,
+                dist_m:r.dist_m}
+  })) });
+  clearQueryMarkers();
+  res.rows.forEach((r,i)=>{
+    const el = document.createElement("div");
+    el.className = "qres-pin";
+    el.textContent = String(i+1);
+    el.title = `${r.building_id} · composite ${r.composite} · ${(r.dist_m/1609.34).toFixed(1)} mi`;
+    _qMarkers.push(new maplibregl.Marker({element:el}).setLngLat([r.lon, r.lat]).addTo(map));
+  });
+  if(res.rows.length){
+    const b = new maplibregl.LngLatBounds();
+    res.rows.forEach(r=>b.extend([r.lon, r.lat]));
+    b.extend([res.center.lon, res.center.lat]);
+    map.fitBounds(b, {padding:90, maxZoom:13, duration:1000});
+  }
+  drawQueryPanel(res, placeLabel);
+}
+
+function clearQueryResults(){
+  const src = map.getSource("qres");
+  if(src) src.setData({type:"FeatureCollection", features:[]});
+  clearQueryMarkers();
+  const el = document.getElementById("qpanel"); if(el) el.remove();
+}
+
+function drawQueryPanel(res, placeLabel){
+  const old = document.getElementById("qpanel"); if(old) old.remove();
+  const el = document.createElement("div"); el.id = "qpanel";
+  // Defensive about the result shape. executor.run() returns the same keys on every branch and
+  // a test asserts that, but this is the path a SHARED LINK lands on: if a partial result ever
+  // reaches here, a thrown TypeError blanks the page and the recipient sees a normal map with
+  // no results and no explanation, which is worse than a vaguer heading.
+  const miles = isFinite(res.radius_m) ? (res.radius_m/1609.34).toFixed(1) : null;
+  const where = placeLabel ? esc(placeLabel)
+    : (res.center && isFinite(res.center.lat) && isFinite(res.center.lon)
+        ? `${res.center.lat.toFixed(4)}, ${res.center.lon.toFixed(4)}`
+        : "the requested area");
+  const rows = res.rows.map((r,i)=>`<tr>
+      <td class="qr-n">${i+1}</td>
+      <td><code>${esc(r.building_id)}</code><div class="qr-sub">${esc(r.county)} &middot; ${(r.dist_m/1609.34).toFixed(1)} mi</div></td>
+      <td class="qr-sc">${r.composite}</td>
+      <td class="qr-pk">${r.wf_score}/${r.hail_score}/${r.flood_score}/${r.wind_score}/${r.access_score}</td>
+    </tr>`).join("");
+  el.innerHTML = `
+    <div class="qp-head">
+      <b>Top ${res.rows.length} by ${esc(res.metric || "score")}</b>
+      <button id="qp-x" title="Clear these results">&times;</button>
+    </div>
+    <div class="qp-sub">${miles ? `within ${miles} mi of ` : ""}${where} &middot; data version ${esc(String(res.version))}</div>
+    ${res.empty ? `<div class="qp-warn">${esc(res.empty)}</div>` : ""}
+    ${(res.notices||[]).map(n=>`<div class="qp-warn">${esc(n)}</div>`).join("")}
+    ${res.rows.length ? `<table class="qp-t"><thead><tr><th></th><th>building</th><th>score</th>
+      <th title="wildfire / hail / flood / wind / access">w/h/f/w/a</th></tr></thead>
+      <tbody>${rows}</tbody></table>` : ""}
+    <div class="qp-note">Screening ranking, not a loss estimate and not an insurability
+      determination. Scores are sampled at the building centroid and several perils are
+      inherited from coarser resolution; access is a 0/1 cohort flag, not a measurement.
+      Counts are floors.</div>
+    <div class="qp-link"><a href="#" id="qp-copy">Copy a link to this result</a></div>`;
+  document.body.appendChild(el);
+  el.querySelector("#qp-x").onclick = clearQueryResults;
+  el.querySelector("#qp-copy").onclick = (e)=>{
+    e.preventDefault();
+    const url = location.origin + location.pathname + res.link;
+    navigator.clipboard?.writeText(url);
+    e.target.textContent = "Link copied";
+  };
+}
+// ⚠️ DEEP-LINK PROBLEMS CANNOT BE REPORTED THROUGH THE COPILOT. That panel is display:none
+// until someone opens it, so a copBubble() about a broken ?q= link is written into a hidden
+// element and the recipient of the link sees a normal map with no results and no explanation.
+// This draws the same panel the results use, carrying only the message.
+function showQueryNotice(message){
+  const old = document.getElementById("qpanel"); if(old) old.remove();
+  const el = document.createElement("div"); el.id = "qpanel";
+  el.innerHTML = `<div class="qp-head"><b>Shared query link</b>
+      <button id="qp-x" title="Dismiss">&times;</button></div>
+    <div class="qp-warn"></div>`;
+  el.querySelector(".qp-warn").textContent = message;
+  document.body.appendChild(el);
+  el.querySelector("#qp-x").onclick = ()=> el.remove();
+}
+
+function esc(v){ return String(v==null?"":v).replace(/[&<>"']/g, c=>(
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function highlightHexes(list){
   const s=map.getSource("hexhl"); if(!s) return;
   s.setData({ type:"FeatureCollection", features:list.map(h=>({ type:"Feature", geometry:{type:"Point",coordinates:[h.lon,h.lat]}, properties:{} })) });
@@ -1259,7 +1482,7 @@ const cop = {};
 function copBubble(role, text){ const d=document.createElement("div"); d.className="cop-b "+role; d.textContent=text; cop.list.appendChild(d); cop.list.scrollTop=cop.list.scrollHeight; return d; }
 let copThinkEl=null;
 function copThink(on, text){ if(on){ if(!copThinkEl){ copThinkEl=copBubble("assistant",text||"Thinking…"); copThinkEl.classList.add("thinking"); } else { copThinkEl.textContent=text||"Thinking…"; } cop.list.scrollTop=cop.list.scrollHeight; } else if(copThinkEl){ copThinkEl.remove(); copThinkEl=null; } }
-const TOOL_LABEL={ set_peril:i=>"Switching to "+(i.peril==="all"?"all perils":i.peril), set_all_mode:i=>"Switching to "+i.mode+" view", fly_to_county:i=>"Flying to "+i.county, focus_county:i=>"Focusing "+i.county, clear_focus:()=>"Clearing focus", fit_colorado:()=>"Zooming to Colorado", get_map_state:()=>"Checking the map", find_hexes:i=>"Finding worst "+(i.peril==="all"?"":i.peril+" ")+"cells"+(i.county?" in "+i.county:" statewide"), clear_hex_highlight:()=>"Clearing highlights" };
+const TOOL_LABEL={ set_peril:i=>"Switching to "+(i.peril==="all"?"all perils":i.peril), set_all_mode:i=>"Switching to "+i.mode+" view", fly_to_county:i=>"Flying to "+i.county, focus_county:i=>"Focusing "+i.county, clear_focus:()=>"Clearing focus", fit_colorado:()=>"Zooming to Colorado", get_map_state:()=>"Checking the map", find_hexes:i=>"Finding worst "+(i.peril==="all"?"":i.peril+" ")+"cells"+(i.county?" in "+i.county:" statewide"), clear_hex_highlight:()=>"Clearing highlights", geocode:i=>"Locating "+i.place, query_properties:i=>"Querying the data around "+(i.place_label||"that point") };
 // The copilot function lives on Vercel and holds ANTHROPIC_API_KEY server-side. When this page
 // is embedded on another origin (wherobots.com/solutions/...), a RELATIVE "/api/chat" resolves
 // to the embedding host, which has no such function -- so target the Vercel deployment
@@ -1288,7 +1511,15 @@ async function copRun(){
       if(txt){ copThink(false); copBubble("assistant", txt); }
       const label = tus.map(tu=> (TOOL_LABEL[tu.name]?TOOL_LABEL[tu.name](tu.input||{}):tu.name)).join(" · ");
       copThink(true, label+"…");
-      const results = tus.map(tu=>{ let out; try{ out = mapTools[tu.name] ? mapTools[tu.name](tu.input||{}) : {error:"unknown tool "+tu.name}; }catch(e){ out={error:String(e)}; } return {type:"tool_result", tool_use_id:tu.id, content:JSON.stringify(out)}; });
+      // AWAITED: query_properties runs spatial SQL in the browser and takes real time. A
+      // synchronous map() here would post back a pending Promise as the tool_result, and the
+      // model would answer from "{}" without noticing anything was missing.
+      const results = await Promise.all(tus.map(async tu=>{
+        let out;
+        try{ out = mapTools[tu.name] ? await mapTools[tu.name](tu.input||{}) : {error:"unknown tool "+tu.name}; }
+        catch(e){ out={error:String(e && e.message || e)}; }
+        return {type:"tool_result", tool_use_id:tu.id, content:JSON.stringify(out)};
+      }));
       copMsgs.push({role:"user", content:results});
       continue;
     }

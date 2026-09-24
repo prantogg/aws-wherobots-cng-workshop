@@ -34,51 +34,80 @@
 
   var DEFAULT_BASE = "https://co-pc-risk-tiles-benp-uw2.s3.us-west-2.amazonaws.com/tiles/query/";
   var TABLE_PREFIX = "co_risk_query_";
-  var EARTH_R = 6371008.8;    // metres, mean Earth radius
-  var BOX_SAFETY = 1.001;     // see circleBox
+
+  /**
+   * The engine-side relation name for one county file.
+   *
+   * ⚠️ THE VERSION IS PART OF THE NAME, AND THAT IS THE POINT. The engine caches a registration
+   * by relation name. Naming it after the county alone means that when a new extract is
+   * published mid-session, or a shared link pins a different version, the same name already
+   * maps to the PREVIOUS version's file: the cache hits, the old file is queried, and the
+   * result is reported under the new version id. Wrong rows, right-looking provenance, no
+   * error. Including the version makes a different version a different relation, so a stale
+   * registration cannot be reused by accident.
+   */
+  function tableName(version, fips) { return TABLE_PREFIX + "v" + version + "_" + fips; }
+  // WGS84, the datum the manifest bboxes and the query centre are in.
+  var A = 6378137.0, E2 = 0.00669437999014;
+  // Residual margin on top of the curvature maths: proportional, plus an absolute floor so a
+  // small radius still gets a real margin (0.1% of 500 m is half a metre, which is too thin to
+  // call a guarantee). A box wider by 25 m can only ever select one extra county file, which
+  // the exact distance test then filters out.
+  var BOX_SAFETY = 1.001;
+  var BOX_FLOOR_M = 25;
+
+  /** Meridional radius of curvature: governs how far a metre moves you in LATITUDE. */
+  function meridionalRadius(latDeg) {
+    var s = Math.sin(latDeg * Math.PI / 180);
+    return A * (1 - E2) / Math.pow(1 - E2 * s * s, 1.5);
+  }
+
+  /** Prime-vertical radius: with cos(lat), governs how far a metre moves you in LONGITUDE. */
+  function primeVerticalRadius(latDeg) {
+    var s = Math.sin(latDeg * Math.PI / 180);
+    return A / Math.sqrt(1 - E2 * s * s);
+  }
+
+  /**
+   * Degree box containing the query circle, from WGS84 RADII OF CURVATURE.
+   *
+   * ⚠️ A SPHERE IS NOT CLOSE ENOUGH HERE, AND IT FAILS SHORT. An earlier version walked
+   * great-circle cardinal points with the mean Earth radius (6,371,009 m). The meridional
+   * radius at Colorado's latitudes is about 6,360,700 m, roughly 0.16% SMALLER, and because the
+   * angular step is `distance / radius`, using the larger mean radius understates it. Measured
+   * against Vincenty: the box edge landed up to **81 m inside** the true circle at the 80 km
+   * clamp in southern Colorado, against a 0.1% pad worth only 80 m.
+   *
+   * That is the unsafe direction. This runs BEFORE any distance test and permanently decides
+   * which county files are registered, so a county whose extent intersects only that short
+   * strip is never registered and its in-radius buildings cannot be recovered downstream: the
+   * silent undercount the floors guardrail exists to prevent.
+   *
+   * Both extents are evaluated where the local radius is SMALLEST over the span the circle
+   * covers, which is what makes the box a superset rather than an approximation:
+   *   - latitude: the meridional radius grows with latitude, so the equator-ward edge governs;
+   *   - longitude: a degree shrinks with latitude, so the pole-ward edge governs.
+   */
+  function circleBox(center, radiusM) {
+    var r = radiusM * BOX_SAFETY + BOX_FLOOR_M;
+    var deg = 180 / Math.PI;
+
+    // A first bound on the latitude span, using the smallest meridional radius anywhere (at the
+    // equator), then re-evaluated at the equator-ward end of that span.
+    var coarse = (r / meridionalRadius(0)) * deg;
+    var equatorward = Math.max(0, Math.abs(center.lat) - coarse);
+    var dLat = (r / meridionalRadius(equatorward)) * deg;
+
+    var north = center.lat + dLat, south = center.lat - dLat;
+    var poleward = Math.min(89.9, Math.max(Math.abs(north), Math.abs(south)));
+    var dLon = (r / (primeVerticalRadius(poleward) * Math.cos(poleward * Math.PI / 180))) * deg;
+
+    return [center.lon - dLon, south, center.lon + dLon, north];
+  }
 
   function versionRoot(version, base) { return (base || DEFAULT_BASE) + "co_risk_query.v" + version + "/"; }
   function manifestUrl(version, base) { return versionRoot(version, base) + "manifest.json"; }
   function latestUrl(base) { return (base || DEFAULT_BASE) + "co_risk_query.latest.json"; }
-
-  /** Destination point at `d` metres along `bearing` from (lat, lng), on a sphere. */
-  function destination(lat, lng, d, bearing) {
-    var dr = d / EARTH_R, br = bearing * Math.PI / 180;
-    var la = lat * Math.PI / 180, lo = lng * Math.PI / 180;
-    var la2 = Math.asin(Math.sin(la) * Math.cos(dr) + Math.cos(la) * Math.sin(dr) * Math.cos(br));
-    var lo2 = lo + Math.atan2(Math.sin(br) * Math.sin(dr) * Math.cos(la),
-                              Math.cos(dr) - Math.sin(la) * Math.sin(la2));
-    return [la2 * 180 / Math.PI, ((lo2 * 180 / Math.PI) + 540) % 360 - 180];
-  }
-
-  /**
-   * Degree box containing the query circle, from GEODESIC cardinal points rather than a
-   * metres-per-degree constant.
-   *
-   * ⚠️ A CONSTANT IS THE WRONG TOOL HERE, AND IT FAILED IN THE UNSAFE DIRECTION. An earlier
-   * version divided by a flat 111,320 m per degree of latitude. Colorado's true meridional figure
-   * near 39 degrees is about 111,000, so the box came out SHORT, by a couple of hundred metres at
-   * the 80 km clamp. This function runs BEFORE any distance test and permanently decides which
-   * county files are registered, so a county whose rows sit in that sliver is dropped with no
-   * error anywhere: the silent undercount the floors guardrail exists to prevent, not a rounding
-   * detail.
-   *
-   * The east and west edges are taken at the box's own highest-latitude edge, not at the centre,
-   * because a degree of longitude shrinks with latitude and the widest span is at the far edge.
-   * BOX_SAFETY pads everything by 0.1%, covering the gap between this spherical model and the
-   * ellipsoid the data sits on (the WGS84 meridian radius varies by about 0.5% equator to pole).
-   * The pad can only ever select an extra file, which the exact ST_DWithin then filters out.
-   */
-  function circleBox(center, radiusM) {
-    var r = radiusM * BOX_SAFETY;
-    var north = destination(center.lat, center.lon, r, 0)[0];
-    var south = destination(center.lat, center.lon, r, 180)[0];
-    var widestLat = Math.abs(north) > Math.abs(south) ? north : south;
-    var east = destination(widestLat, center.lon, r, 90)[1];
-    var west = destination(widestLat, center.lon, r, 270)[1];
-    return [Math.min(west, east), Math.min(south, north),
-            Math.max(west, east), Math.max(south, north)];
-  }
 
   function boxesIntersect(a, b) {
     return !(a[2] < b[0] || a[0] > b[2] || a[3] < b[1] || a[1] > b[3]);
@@ -103,7 +132,7 @@
           name: c.name,
           rows: c.rows,
           url: root + c.path,
-          table: TABLE_PREFIX + c.county
+          table: tableName(manifest.version, c.county)
         };
       });
   }
@@ -140,11 +169,15 @@
   return {
     DEFAULT_BASE: DEFAULT_BASE,
     TABLE_PREFIX: TABLE_PREFIX,
-    destination: destination,
+    tableName: tableName,
     versionRoot: versionRoot,
     manifestUrl: manifestUrl,
     latestUrl: latestUrl,
     circleBox: circleBox,
+    BOX_SAFETY: BOX_SAFETY,
+    BOX_FLOOR_M: BOX_FLOOR_M,
+    meridionalRadius: meridionalRadius,
+    primeVerticalRadius: primeVerticalRadius,
     boxesIntersect: boxesIntersect,
     selectCounties: selectCounties,
     resolveVersion: resolveVersion

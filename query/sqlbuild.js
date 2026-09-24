@@ -38,8 +38,38 @@
   "use strict";
 
   var RELATION = "co_risk_query";
+
+  /**
+   * How the geometry column is read back.
+   *
+   * ⚠️ THE ENGINE DOES NOT READ GeoParquet METADATA, so `geom_5070` arrives as a plain binary
+   * column and every spatial kernel refuses it ("No kernel matching arguments"). It has to be
+   * decoded from WKB at read time. The SRID then has to be set explicitly as well: the engine
+   * compares CRS before it compares geometry, and a decoded WKB has none, which fails against
+   * the query point's EPSG:5070 with "Mismatched CRS arguments: None vs epsg:5070". Both were
+   * measured against @cereusdb/standard, not assumed.
+   */
+  var GEOM = "ST_SetSRID(ST_GeomFromWKB(b.geom_5070), 5070)";
+
+  /**
+   * EPSG:5070 is NAD83 / Conus Albers, which is EQUAL-AREA, not equidistant. Measured against
+   * geodesic distance across Colorado, a planar distance in it runs about +0.7% to +0.8%
+   * north-south and -0.6% to -0.7% east-west. So `ST_DWithin(..., 16093.4)` is not a 10-mile
+   * circle on the ground; north-south it falls about 123 m SHORT.
+   *
+   * Falling short is the dangerous direction: it drops buildings that really are inside the
+   * radius, with no error anywhere, which is the silent undercount the floors guardrail exists
+   * to prevent. So the predicate is inflated past the worst measured distortion, making the SQL
+   * filter a conservative SUPERSET in every direction, and the executor then applies the exact
+   * radius using a true geodesic distance computed from the returned lon/lat.
+   *
+   * There is no ST_DistanceSpheroid in this build, so the projection cannot be avoided in SQL.
+   */
+  var PLANAR_SLACK = 1.01;
   var RELATION_RE = /\bco_risk_query\b/g;
-  var TABLE_RE = /^co_risk_query_\d{5}$/;
+  // Relation names are version-scoped (co_risk_query_v<YYYYMMDD>_<FIPS>), so a newly published
+  // extract cannot reuse a cached registration of the previous one.
+  var TABLE_RE = /^co_risk_query_v\d{8}_\d{5}$/;
 
   // Re-stated here rather than imported so that a build path which somehow skipped validation
   // still cannot reach an ORDER BY with a free string. Defence in depth: validate.js is the
@@ -88,6 +118,17 @@
    * entirely on the county-fallback path, where the bounded read comes from registering only the
    * intersecting counties.
    */
+  /**
+   * How many rows the SQL asks for, given the caller's limit.
+   *
+   * Exported because the executor needs THIS number to know whether a short answer means "there
+   * are only that many" or "the over-fetch ran out". Comparing against a hardcoded guess is how
+   * that notice ends up unable to fire.
+   */
+  function fetchLimitFor(limit) { return Math.min(MAX_FETCH, limit * 2 + 20); }
+
+  var MAX_FETCH = 200;
+
   function template(opts) {
     var metric = opts.metricColumn;
     if (METRIC_COLUMNS.indexOf(metric) === -1) throw new Error("metric not allowlisted: " + metric);
@@ -106,6 +147,11 @@
                   "  AND ";
     }
 
+    // Over-fetch so the executor's exact geodesic filter still has `limit` rows to return after
+    // it removes the slack ring. The ring is ~2% of the disk area, so this margin is ample; the
+    // executor reports it honestly if a query ever exhausts it.
+    var fetchLimit = fetchLimitFor(opts.limit);
+
     return "" +
       "WITH pt AS (\n" +
       "  SELECT ST_Transform(ST_Point(" + num(opts.center.lon) + ", " + num(opts.center.lat) +
@@ -113,13 +159,14 @@
       ")\n" +
       "SELECT b.building_id, b.composite, b.wf_score, b.hail_score, b.flood_score,\n" +
       "       b.wind_score, b.access_score, b.county,\n" +
-      "       ST_X(ST_Transform(b.geom_5070, 'EPSG:5070', 'EPSG:4326')) AS lon,\n" +
-      "       ST_Y(ST_Transform(b.geom_5070, 'EPSG:5070', 'EPSG:4326')) AS lat,\n" +
-      "       ST_Distance(b.geom_5070, pt.g) AS dist_m\n" +
+      "       ST_X(ST_Transform(" + GEOM + ", 'EPSG:5070', 'EPSG:4326')) AS lon,\n" +
+      "       ST_Y(ST_Transform(" + GEOM + ", 'EPSG:5070', 'EPSG:4326')) AS lat,\n" +
+      "       ST_Distance(" + GEOM + ", pt.g) AS planar_dist_m\n" +
       "FROM " + RELATION + " b, pt\n" +
-      "WHERE " + prefilter + "ST_DWithin(b.geom_5070, pt.g, " + num(opts.radius_m) + ")\n" +
+      "WHERE " + prefilter + "ST_DWithin(" + GEOM + ", pt.g, " +
+      num(Math.round(opts.radius_m * PLANAR_SLACK * 10) / 10) + ")\n" +
       "ORDER BY b." + metric + " DESC, b.building_id ASC\n" +
-      "LIMIT " + num(opts.limit) + ";";
+      "LIMIT " + num(fetchLimit) + ";";
   }
 
   /**
@@ -138,6 +185,7 @@
     }), tables);
     return {
       sql: sql,
+      fetchLimit: fetchLimitFor(value.limit),
       registrations: counties.map(function (c) { return { url: c.url, table: c.table }; }),
       prune: cover.mode === "h3"
         ? { mode: "h3", column: cover.column, cells: cover.cellCount }
@@ -147,6 +195,10 @@
 
   return {
     RELATION: RELATION,
+    GEOM: GEOM,
+    PLANAR_SLACK: PLANAR_SLACK,
+    MAX_FETCH: MAX_FETCH,
+    fetchLimitFor: fetchLimitFor,
     METRIC_COLUMNS: METRIC_COLUMNS,
     derivedTable: derivedTable,
     substituteRelation: substituteRelation,
