@@ -200,14 +200,13 @@ Two defects only a real write could expose, both fixed:
   inside the file and wins, typed as an int, so `08031` came back as `8031`. It now reads each
   county file with `basePath` pinned to its own directory, which is also how the browser reads.
 
-## Superseded files still on the branch
+## Superseded files, removed
 
-`spike.html`, `spike-worker.js`, `fetch-count.js` and `tests/test_query_bytecount.js` were built
-for the labs engine and no longer work against this one: `spike.html` calls
-`engine.jspiSupported()` and `PINNED_COMMIT`, neither of which exists now. They are dead, nothing
-links to them, and no test loads them. They are deleted in a separate follow-up PR rather than
-here, because removing them costs 27 KB of pure deletion and this PR was over the reviewer's
-200 KB diff limit, where a skip is not a pass.
+`spike.html`, `spike-worker.js`, `fetch-count.js` and `pipelines/co-risk/tests/test_query_bytecount.js`
+were built for the labs engine and stopped working against CereusDB (`spike.html` called
+`engine.jspiSupported()` and `PINNED_COMMIT`, neither of which exists now). Nothing linked to
+them and no test runner loaded them, so they were deleted in their own PR. Recover them from
+git history if the labs build is ever re-evaluated.
 
 ---
 
