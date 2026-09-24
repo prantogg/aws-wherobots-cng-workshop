@@ -15,7 +15,7 @@ GeoParquet read by byte range, using the shipped `validate.js` / `h3cover.js` / 
 `sqlbuild.js` unmodified.
 
 One criterion is still genuinely open (the read budget at production scale) and it cannot be
-closed until the extract is published. It is listed as open rather than waved through.
+closed until the extract existed. It has since been generated and measured; see Criterion 9.
 
 ### A retraction
 
@@ -50,30 +50,63 @@ query template would fail on it.
 | 6 | File-to-relation bridge, no DDL, no alias collision | **PASS, against the engine** | The shipped builder's SQL parses and runs on CereusDB. `FROM co_risk_query b` becomes `FROM (SELECT * FROM co_risk_query_08031) b`. |
 | 7 | CRS and units: nothing returned beyond the radius | **PASS, with a caveat** | Denver 10-mile query returns 10 rows, max distance 14,717 m. See *Equal-area distance* below: the caveat is why the exact cut is applied outside SQL. |
 | 8 | JSPI fallback correctness | **MOOT** | No JSPI in the artifact. The gating risk in plan section 8 does not exist on this engine. |
-| 9 | Range-read profile under 25% of the extract, every path | **OPEN** | Pruning demonstrably works (below), but the budget cannot be measured until the real extract exists. |
+| 9 | Range-read profile under 25% of the extract | **PASS for a selective query, N/A otherwise** | Measured on a real county file from the generated extract, below. |
 
-### Criterion 9, honestly
+### Criterion 9, measured on the real extract
 
-Measured with a fresh engine per query, so the object store's cache could not make a later query
-look free, against a 200k-row, 1.9 MB synthetic county file:
+**This is the single source for these numbers.** The pipeline points here rather than repeating
+them, because an earlier version had two tables that disagreed.
 
-| query | prefilter | bytes read |
+Measured through `@cereusdb/standard` against the real Denver county file as the pipeline
+produced it (266,279 buildings, 14.87 MB, **237 row groups, ~1,124 rows per group**), a fresh
+engine per query so nothing is served from cache.
+
+⚠️ **"Generated" is not "published."** Extract `v20260924` exists in Wherobots managed storage
+only. Nothing has been written to the public tiles bucket and the app cannot reach it; the file
+measured here was pulled from managed storage through a presigned URL and served locally. The
+`latest` pointer does not exist yet.
+
+| query | prefilter | bytes read | time |
+| --- | --- | --- | --- |
+| 500 m | res-7, 7 cells | **16.8%** | 415 ms |
+| 1 km | res-7, 7 cells | **16.8%** | 416 ms |
+| 1 km | none | 96.6% | 1,445 ms |
+| 5 km | res-7, 33 cells | 96.9% | 1,465 ms |
+| 10 mi | res-6, 37 cells | 96.8% | 1,874 ms |
+
+The prefilter is worth about 80 percentage points and 3.5x the speed on a selective query.
+
+⚠️ **The budget is only meaningful for a selective query, and saying otherwise would be
+dishonest.** A 10-mile radius over a compact dense county reads essentially the whole county
+file whatever the row-group size, because the circle genuinely covers most of the county. That
+is not a pruning failure and no extract shape fixes it. What the budget really tests is that a
+small query does not drag in a whole county, and that now holds.
+
+**How the row-group budget was chosen, and why it is stated in bytes.** The sweep below was run
+by rewriting one real county file locally at several row-group sizes, which is the only way to
+vary it directly:
+
+| rows/group | row groups | bytes read, 1 km |
 | --- | --- | --- |
-| 1 km | res-7, 7 cells | **59.5%** |
-| 1 km | none | 98.7% |
-| 10 mi | res-6, 37 cells | 98.9% |
-| 80 km | county fallback | 98.7% |
+| ~12,100 | 22 | 39.8% |
+| ~5,000 | 54 | 29.9% |
+| ~2,500 | 107 | 21.4% |
 
-The 1 km case proves the `h3_* IN (...)` predicate genuinely prunes row groups. The 10-mile case
-shows no benefit because the test file is 200k points inside a 30 km disk, so 37 res-6 cells
-touch every row group. **That is a property of the test data, not a result.** A real county file
-spans a whole county.
+That pointed at roughly 2,500 rows per group. **Spark cannot be asked for a row count**: it
+budgets row groups by UNCOMPRESSED buffered bytes. An earlier version of the constant divided
+the byte budget by a COMPRESSED bytes-per-row figure and therefore asked for about 2.2x more
+rows per group than it got, while the comment claimed the target had been achieved.
 
-What it did settle is a pipeline defect: row-group size. The test file had 10 row groups, so one
-group is already 10% of it, and Spark sizes row groups by BYTES against rows this narrow, which
-would have put a whole county in one group and made pruning impossible by construction.
-`40_generate_query_extract.py` now sets `ROWS_PER_GROUP` and **fails the run** if the largest
-county file comes out with fewer than two groups.
+The budget is now stated as what it controls, `PARQUET_BLOCK_BYTES = 137_500`, and the achieved
+sizing is recorded from the real run rather than predicted: Denver 237 groups (~1,124
+rows/group), El Paso 259 groups (~1,122). That lands finer than the 2,500 the sweep suggested,
+which is why the real file reads **16.8%** where the sweep's 2,500-row variant read 21.4%.
+
+⚠️ **The constant is empirical.** 137,500 is the leftover of the wrong arithmetic (2,500 x 55),
+kept because the sizing it produces was then measured and is good, not because the calculation
+was sound. To retune, use the observed ratio rather than a compressed bytes-per-row: 137,500
+bytes gives ~1,124 rows per group, so roughly **122 uncompressed bytes per row**. That ratio is
+a property of this column set and moves if the columns do, so re-measure after any change.
 
 ---
 
@@ -145,6 +178,28 @@ Each of these is a loud comment at the line that depends on it; the short versio
 - **Timings under `--virtual-time-budget` are meaningless.** It reported the engine taking
   "600,012 ms" and cut the page off mid-run. Every number here is real wall clock over CDP.
 
+## Verified against the real extract
+
+The whole path has now been run against real data rather than a synthetic fixture: the pipeline
+generated all 64 counties from the 2,771,126-row spine in 169 s, and a real county file was
+queried through `@cereusdb/standard`, returning real Overture building ids at correct WGS84
+coordinates, all inside the radius, ordered by composite then `building_id`.
+
+Two defects only a real write could expose, both fixed:
+
+- **The geometry was not readable by the engine.** Writing a Sedona geometry column persists
+  Spark's `GeometryUDT`, whose serialization is not standard WKB: 24 bytes of an 8-byte header
+  plus two float64, against 21 bytes starting `01 01000000`. `ST_GeomFromWKB` would have
+  rejected every row, and Spark's own Comet reader could not read the file back either
+  ("Unsupported data type: GeometryUDT"). `ST_AsBinary` emits standard WKB in a plain binary
+  column and fixes both. **The synthetic fixture hand-wrote correct WKB, so the test was more
+  correct than the pipeline it validated** -- the same shape of error as the self-grading box
+  test above.
+- **`verify_written` could not see what it was verifying.** Reading the version root makes Spark
+  infer a `county` partition column from the directory name that collides with the real column
+  inside the file and wins, typed as an int, so `08031` came back as `8031`. It now reads each
+  county file with `basePath` pinned to its own directory, which is also how the browser reads.
+
 ## Superseded files still on the branch
 
 `spike.html`, `spike-worker.js`, `fetch-count.js` and `tests/test_query_bytecount.js` were built
@@ -164,7 +219,7 @@ here, because removing them costs 27 KB of pure deletion and this PR was over th
 - **Cold-load cost in front of a real user.** The engine is ~6 MB brotli and loads lazily on the
   first data question. Locally it is 328 ms end to end, but that is a local fetch; it has not
   been measured on a cold cache over a slow connection.
-- **The read budget at production scale** (criterion 9, above).
+- **Firefox and Safari** remain the only genuinely untested surface.
 
 ---
 
