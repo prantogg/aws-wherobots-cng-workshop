@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Launch Kiro on this repo with the workshop credentials exported.
 #
-# Kiro substitutes ${WHEROBOTS_API_KEY}, ${FELT_API_TOKEN} and ${AURORA_DSN} in
+# Kiro substitutes ${WHEROBOTS_API_KEY} and ${FELT_API_TOKEN} in
 # .kiro/settings/mcp.json from the environment Kiro was started with. It does
 # not read .env. Starting Kiro from the Dock, or from a shell without these
-# exported, gives MCP servers with unresolved placeholders (postgres fails with
-# "Invalid URL: ${AURORA_DSN}", Wherobots calls fail with "Invalid API key").
+# exported, gives MCP servers with unresolved placeholders (Wherobots calls
+# fail with "Invalid API key").
 #
 # Usage:  scripts/kiro.sh            # export .env and open Kiro on the repo
 #         scripts/kiro.sh --check    # show which variables .env provides, don't launch
@@ -27,7 +27,7 @@ for rc in ~/.zshenv ~/.zprofile ~/.zshrc ~/.bash_profile ~/.bashrc ~/.profile; d
   fi
 done
 if [ "${1:-}" = "--check" ]; then
-  for v in WHEROBOTS_API_KEY FELT_API_TOKEN AURORA_DSN FELT_SOURCE_NAME; do
+  for v in WHEROBOTS_API_KEY FELT_API_TOKEN FELT_SOURCE_NAME; do
     val="${!v:-}"
     case "$val" in
       ""|your-*|*"<"*) echo "  $v: NOT SET (placeholder)";;

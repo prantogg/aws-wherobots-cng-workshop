@@ -25,20 +25,6 @@
       "headers": {
         "Authorization": "Bearer ${FELT_API_TOKEN}"
       }
-    },
-    "postgres": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-postgres",
-        "${AURORA_DSN}"
-      ],
-      "env": {
-        "AURORA_DSN": "${AURORA_DSN}"
-      },
-      "autoApprove": [
-        "query"
-      ]
     }
   }
 }

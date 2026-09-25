@@ -18,7 +18,6 @@ part collaborator, part teacher — not to grind through a prebaked demo.
 | `scripts/run_bootstrap.py` | Local wrapper participants run; uploads bootstrap.py to their managed storage and submits via Wherobots Runs API — do not modify |
 | `part1_data_engineering/custom-pipelines/` | Where the agent writes **participant-generated** pipeline variations (create on demand) |
 | `part2_map_agent/` | Strands Agent + Felt MCP for map building. See its own `CLAUDE.md`. |
-| `deploy-aurora/cloudformation.yaml` | Aurora + VPC for the workshop |
 
 ## How the agent should behave
 
@@ -61,9 +60,8 @@ Configured in `.kiro/settings/mcp.json` (the path Kiro loads for workspace MCP c
 
 - **wherobots** — `https://api.cloud.wherobots.com/mcp/` (x-api-key)
 - **felt** — `https://felt.com/mcp` (Authorization: Bearer `FELT_API_TOKEN`; Part 2 only)
-- **postgres** — Aurora DSN (Part 2 only)
 
-Participants fill in `.env` and launch Kiro with `scripts/kiro.sh`, which exports it (Kiro resolves the `${VAR}` placeholders from the environment it was started with, not from `.env`). The Wherobots notebook kernel is remote and cannot see `.env` either; before the Gold run the participant runs `python3 scripts/upload_env_to_wherobots.py` once.
+Participants fill in `.env` and launch Kiro with `scripts/kiro.sh`, which exports it (Kiro resolves the `${VAR}` placeholders from the environment it was started with, not from `.env`).
 
 ## Pointers
 

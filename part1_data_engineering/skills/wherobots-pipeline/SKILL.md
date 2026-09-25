@@ -25,9 +25,8 @@ Details are in `./references/`:
 
 ## Participant mode — Explore / Run Reference / Generate Custom
 
-The workshop ships a pre-generated reference pipeline and pre-loaded Gold
-tables in Aurora as a safety net. The agent serves three modes from the
-same chat; infer the mode from the participant's prompt.
+The workshop ships a pre-generated reference pipeline. The agent serves
+three modes from the same chat; infer the mode from the participant's prompt.
 
 ### Explore
 
@@ -79,17 +78,6 @@ run the notebooks on the participant's behalf.
 | `bronze-to-silver.ipynb` | **Large** | Raster zonal stats + spatial KNN + cached-buildings shuffle. The reference AOI is San Diego **County** (~1.03M buildings): about 50 min on Large, of which the mesocyclone KNN is 16 min and the 17-week flood loop 9 min. Medium is enough for the city AOI (~358K buildings, about 13 min) but lost executors in the KNN stage under a heavier load. |
 | `silver-to-gold.ipynb` | **Small** | SQL-only on pre-joined Silver tables — no spatial joins or raster ops. About 2.5 minutes for the city AOI, about 6 minutes for the county. |
 
-**Aurora connection on a remote kernel.** The Wherobots kernel runs in
-Wherobots Cloud and cannot see the participant's laptop environment or
-`.env`. Before the Gold run, the participant runs once from the repo root:
-
-    set -a; source .env; set +a
-    python3 scripts/upload_env_to_wherobots.py
-
-It uploads only the `AURORA_DSN` line to their org's managed storage and
-points the notebook at it. Never tell a participant to "set AURORA_DSN in
-your environment" for a remote kernel; it has no effect there.
-
 **Reporting Gold completion — one row per industry, same shape.**
 When all four Gold tables land (`insurance_exposure`, `cre_risk`,
 `capital_markets_signals`, `energy_asset_risk`), produce a single
@@ -104,7 +92,7 @@ tier-distribution table with the same columns for every industry:
 
 Don't mix industries' tiers into one row, drop an industry from the
 summary, or substitute a non-tier metric for a missing one. If a
-write didn't land (Aurora-skipped is not a miss; Iceberg missing
+write didn't land (GeoParquet-skipped is not a miss; Iceberg missing
 is), call it out explicitly as its own line. Follow with a one-line
 interpretation pointing out where the distributions diverge across
 industries — that's where participants see the *"same data, different
@@ -422,7 +410,7 @@ table covers only the non-obvious traps LLMs consistently hit.
 
 **Config cell safety**: when editing the config cell, always read the full
 cell first and verify that ALL existing variables (`SCORING_WEIGHTS`,
-`RISK_PERCENTILES`, `INDUSTRY_FACTORS`, `AURORA_SCHEMA`, etc.) survive.
+`RISK_PERCENTILES`, `INDUSTRY_FACTORS`, `GEOPARQUET_BASE`, etc.) survive.
 Partial edits that truncate the cell are a common failure mode.
 
 ### ipynb format
