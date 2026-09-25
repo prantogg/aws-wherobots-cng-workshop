@@ -1342,7 +1342,14 @@ const mapTools = {
             note:"Colorado gazetteer. Pass these exact coordinates to query_properties."};
   },
 
-  query_properties: async ({lon, lat, radius_m, metric="composite", limit=10, place_label})=>{
+  query_properties: async ({lon, lat, place, radius_m, metric="composite", limit=10, place_label})=>{
+    // A place name is geocoded HERE rather than by a separate geocode tool call, because that
+    // call is a whole model round trip (~2-3 s) spent only on a table lookup the browser can do.
+    // Precedence (explicit lon/lat always win; a lone axis is refused) lives in resolveCentre,
+    // where tests/test_query_centre.js pins it.
+    const c = CoRiskQuery.gazetteer.resolveCentre({lon, lat, place, place_label});
+    if(!c.ok) return {error:c.error};
+    lon = c.lon; lat = c.lat; place_label = c.label || undefined;
     const eng = await loadQueryEngine();
     const res = await CoRiskQuery.executor.run(
       {center:{lon, lat}, radius_m, metric, limit}, {engine:eng});
@@ -1361,13 +1368,35 @@ const mapTools = {
   }
 };
 
-// The engine is ~6 MB brotli, so it loads on the FIRST data question and never on page load.
-// Everything else on this map keeps working whether or not it ever loads.
+// The engine is ~6 MB brotli (45 MB raw), so it never loads on page load: map-only visitors
+// never pay for it. It starts downloading when the COPILOT OPENS (warmQueryEngine), so the
+// download overlaps with the user typing and the model's first turn instead of starting only
+// once a data question arrives. Measured on the live app: it was the single largest item in a
+// first answer, running strictly after two model round trips. Everything else on this map keeps
+// working whether or not it ever loads.
 let _engine = null;
+// Progress is routed through ONE callback owned here, whichever caller starts the load.
+// engine.load() returns its cached promise to a second caller and ignores that caller's options,
+// so a question that joins a warm-up already in flight would otherwise never see "downloading"
+// or "compiling". The latest stage is kept so a question arriving mid-load shows where it is.
+let _engineStage = null, _engineWaiting = false;
+function engineProgress(m){
+  _engineStage = m;
+  if(_engineWaiting) copThink(true, m+"…");
+}
+function warmQueryEngine(){
+  if(_engine || CoRiskQuery.engine.isLoaded()) return;
+  // Idempotent: engine.load() caches the in-flight promise, so the first real question joins
+  // this download instead of starting another. A failure is swallowed HERE only because load()
+  // clears its cache on failure, so that question retries and reports the error itself.
+  CoRiskQuery.engine.load({ onProgress: engineProgress }).then(e=>{ if(!_engine) _engine = e; }, ()=>{});
+}
 async function loadQueryEngine(){
   if(_engine && !_engine.dead) return _engine;
-  copThink(true, "Loading the query engine (first question only)…");
-  _engine = await CoRiskQuery.engine.load({ onProgress:(m)=>copThink(true, m+"…") });
+  copThink(true, (_engineStage || "Loading the query engine (first question only)") + "…");
+  _engineWaiting = true;
+  try{ _engine = await CoRiskQuery.engine.load({ onProgress: engineProgress }); }
+  finally{ _engineWaiting = false; }
   return _engine;
 }
 
@@ -1482,7 +1511,7 @@ const cop = {};
 function copBubble(role, text){ const d=document.createElement("div"); d.className="cop-b "+role; d.textContent=text; cop.list.appendChild(d); cop.list.scrollTop=cop.list.scrollHeight; return d; }
 let copThinkEl=null;
 function copThink(on, text){ if(on){ if(!copThinkEl){ copThinkEl=copBubble("assistant",text||"Thinking…"); copThinkEl.classList.add("thinking"); } else { copThinkEl.textContent=text||"Thinking…"; } cop.list.scrollTop=cop.list.scrollHeight; } else if(copThinkEl){ copThinkEl.remove(); copThinkEl=null; } }
-const TOOL_LABEL={ set_peril:i=>"Switching to "+(i.peril==="all"?"all perils":i.peril), set_all_mode:i=>"Switching to "+i.mode+" view", fly_to_county:i=>"Flying to "+i.county, focus_county:i=>"Focusing "+i.county, clear_focus:()=>"Clearing focus", fit_colorado:()=>"Zooming to Colorado", get_map_state:()=>"Checking the map", find_hexes:i=>"Finding worst "+(i.peril==="all"?"":i.peril+" ")+"cells"+(i.county?" in "+i.county:" statewide"), clear_hex_highlight:()=>"Clearing highlights", geocode:i=>"Locating "+i.place, query_properties:i=>"Querying the data around "+(i.place_label||"that point") };
+const TOOL_LABEL={ set_peril:i=>"Switching to "+(i.peril==="all"?"all perils":i.peril), set_all_mode:i=>"Switching to "+i.mode+" view", fly_to_county:i=>"Flying to "+i.county, focus_county:i=>"Focusing "+i.county, clear_focus:()=>"Clearing focus", fit_colorado:()=>"Zooming to Colorado", get_map_state:()=>"Checking the map", find_hexes:i=>"Finding worst "+(i.peril==="all"?"":i.peril+" ")+"cells"+(i.county?" in "+i.county:" statewide"), clear_hex_highlight:()=>"Clearing highlights", geocode:i=>"Locating "+i.place, query_properties:i=>"Querying the data around "+(i.place_label||i.place||"that point") };
 // The copilot function lives on Vercel and holds ANTHROPIC_API_KEY server-side. When this page
 // is embedded on another origin (wherobots.com/solutions/...), a RELATIVE "/api/chat" resolves
 // to the embedding host, which has no such function -- so target the Vercel deployment
@@ -1533,7 +1562,7 @@ async function copRun(){
 function copSend(){ const t=cop.text.value.trim(); if(!t) return; cop.text.value=""; copBubble("user",t); copMsgs.push({role:"user", content:t}); copRun(); }
 (function(){
   cop.panel=document.getElementById("copilot"); cop.list=document.getElementById("cop-msgs"); cop.text=document.getElementById("cop-text");
-  document.getElementById("copilot-fab").onclick=()=>{ cop.panel.style.display="flex"; document.getElementById("copilot-fab").style.display="none";
+  document.getElementById("copilot-fab").onclick=()=>{ cop.panel.style.display="flex"; document.getElementById("copilot-fab").style.display="none"; setTimeout(warmQueryEngine, 0);
     if(!cop.list.children.length) copBubble("assistant","Ask me about Colorado exposure — e.g. “worst wildfire counties” or “show me El Paso hail”. I can move the map for you.");
     cop.text.focus(); };
   document.getElementById("cop-x").onclick=()=>{ cop.panel.style.display="none"; document.getElementById("copilot-fab").style.display="inline-flex"; };

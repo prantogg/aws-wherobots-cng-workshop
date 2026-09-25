@@ -43,8 +43,10 @@
  * a clean message, and a failed query marks the engine dead so the following question rebuilds
  * it instead of talking to a corpse.
  *
- * ⚠️ THE ENGINE LOADS ON THE MAIN THREAD, LAZILY, ON THE FIRST DATA QUESTION. That is a
- * deliberate v1 tradeoff: it is roughly 6 MB brotli and compiling it briefly blocks the UI.
+ * ⚠️ THE ENGINE LOADS ON THE MAIN THREAD, LAZILY: never on page load, and started when the
+ * copilot opens (index.html warmQueryEngine) so the download overlaps the first model turn.
+ * That is a deliberate v1 tradeoff: it is roughly 6 MB brotli and compiling it briefly blocks
+ * the UI.
  * Putting it in a module Worker is the next step, and the only reason it is not here yet is that
  * it adds a message protocol to something that otherwise has none. Nothing else in the app
  * touches the engine, so moving it later is contained.

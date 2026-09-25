@@ -178,6 +178,38 @@
                     "Colorado data only, so places outside the state cannot be answered." };
   }
 
+  var NEED_CENTRE = "query_properties needs a Colorado place name (place), or BOTH lon and lat.";
+
+  /**
+   * The query centre from query_properties' arguments. The model may pass a place name, a
+   * lon/lat pair, or both.
+   *
+   * ⚠️ EXPLICIT COORDINATES ALWAYS WIN. The gazetteer fills the centre only when NEITHER lon nor
+   * lat is given. A place plus a lone lon or lat is an INCOMPLETE centre and is refused, never
+   * completed or overwritten from the gazetteer: mixing one explicit axis with one geocoded axis
+   * would put the query at a point nobody asked for, and the answer would still look right.
+   *
+   * Returns { ok:true, lon, lat, label, source:"coordinates"|"place" } or { ok:false, error }.
+   * `label` is the caller's place_label, else the gazetteer name for a geocoded centre. A place
+   * name is NOT used to label explicit coordinates, because they need not be that place.
+   */
+  function resolveCentre(args) {
+    var a = args || {};
+    var hasLon = a.lon != null, hasLat = a.lat != null;
+    if (hasLon && hasLat) {
+      return { ok: true, lon: a.lon, lat: a.lat, label: a.place_label || null,
+               source: "coordinates" };
+    }
+    if (hasLon || hasLat) return { ok: false, error: NEED_CENTRE };
+    if (a.place) {
+      var g = geocode(a.place);
+      if (!g.ok) return { ok: false, error: g.error };
+      return { ok: true, lon: g.center.lon, lat: g.center.lat, label: a.place_label || g.name,
+               source: "place" };
+    }
+    return { ok: false, error: NEED_CENTRE };
+  }
+
   return { PLACES: PLACES, has: has, normalize: normalize, forms: forms, stripNoise: stripNoise,
-           containsWords: containsWords, geocode: geocode };
+           containsWords: containsWords, geocode: geocode, resolveCentre: resolveCentre };
 });
