@@ -61,10 +61,12 @@ Measured through `@cereusdb/standard` against the real Denver county file as the
 produced it (266,279 buildings, 14.87 MB, **237 row groups, ~1,124 rows per group**), a fresh
 engine per query so nothing is served from cache.
 
-⚠️ **"Generated" is not "published."** Extract `v20260924` exists in Wherobots managed storage
-only. Nothing has been written to the public tiles bucket and the app cannot reach it; the file
-measured here was pulled from managed storage through a presigned URL and served locally. The
-`latest` pointer does not exist yet.
+⚠️ **These numbers were taken before the extract was published.** At the time, `v20260924`
+existed in Wherobots managed storage only, and the file measured here was pulled through a
+presigned URL and served locally. It has since been published to the public tiles bucket:
+`tiles/query/co_risk_query.latest.json` points at `v20260924` (`published_utc`
+2026-09-24T18:17:00Z), and anonymous GET of its `manifest.json` returns 200 (both checked
+2026-09-24). The *Range reads* section below was measured against that published copy on S3.
 
 | query | prefilter | bytes read | time |
 | --- | --- | --- | --- |
@@ -107,6 +109,150 @@ kept because the sizing it produces was then measured and is good, not because t
 was sound. To retune, use the observed ratio rather than a compressed bytes-per-row: 137,500
 bytes gives ~1,124 rows per group, so roughly **122 uncompressed bytes per row**. That ratio is
 a property of this column set and moves if the columns do, so re-measure after any change.
+
+---
+
+## Range reads: why a first query was serial, and the fix
+
+Measured 2026-09-24 in headless Chrome 153 on macOS 26.5, through `window.mapTools.query_properties`
+(the real app path: HEAD, register, SQL, geodesic cut), against the published `v20260924` extract
+on S3, a fresh browser profile per run, with the engine already loaded so only the query is
+timed. The link measured 13.5 MB/s (a `curl` of the 16.3 MB El Paso file). Every request was
+counted over CDP `Network`.
+
+### What each request is
+
+Boulder 1 km on the live app (`21952ad`), 44 requests:
+
+| # | request | size | when |
+| --- | --- | --- | --- |
+| 1 | `HEAD` from `engine.js` (reachability check) | | register |
+| 1 | `HEAD` from DataFusion (object size) | | register |
+| 1 | `GET` of the last 512 KiB (`metadata_size_hint` = 524288): the footer (178 KB of Thrift for 128 row groups) plus the page indexes before it | 525 KB | register |
+| 1 | `HEAD` from DataFusion | | query |
+| 40 | `GET`, one per row group that survives `h3_7` min/max pruning, all 10 projected columns coalesced into one range (~62 KB each) | 2.5 MB | query |
+
+The footer is read once and cached for the session. So a first query in a county is one footer
+read plus one read per surviving row group, and it was the row-group reads that were serial:
+each started only after the previous one finished, 60 to 150 ms apart, maximum concurrency 1
+(2 counting the page's own HEAD).
+
+### Why they were sequential
+
+Two causes, and both had to go:
+
+1. **`target_partitions` is 1 in this build** (read from `information_schema.df_settings`), so
+   DataFusion scans a file as one stream that requests a row group, decodes it, and only then
+   requests the next. The engine's JS fetch queue allows 16 in flight; nothing ever asked for
+   more than one.
+2. **The query point was a `WITH pt AS (...)` cross join, which SedonaDB plans as
+   `SpatialJoinExec`.** Raising `target_partitions` split the file into byte-range partitions
+   (EXPLAIN showed 8 file groups), but the spatial join drained them one at a time, so the reads
+   stayed serial (still 41 GETs, concurrency 2, 4.5 to 5.6 s at 4, 8 and 16 partitions).
+
+With the point inlined as a constant expression the plan is a plain `FilterExec` over the scan
+under `SortExec TopK` per partition and `SortPreservingMergeExec`, and the partitions read
+concurrently. The planner folds the point to the same WKB literal either way.
+
+### Fix
+
+- `sqlbuild.js`: the query point is inlined instead of a `pt` CTE.
+- `engine.js`: at load, `SET datafusion.execution.target_partitions = 16`,
+  `datafusion.optimizer.repartition_file_min_size = 0` and
+  `datafusion.optimizer.enable_round_robin_repartition = false`.
+
+⚠️ **The third setting is a safety setting.** Without `repartition_file_min_size = 0` the file
+(smaller than the 10 MB default) is not split, and the planner instead inserts a
+`RepartitionExec RoundRobinBatch(8)` above the scan. In this WASM build that query did not
+complete within 40 s, where the serial plan takes 4 s. The same happened with the old CTE shape
+at 16 partitions. With round-robin repartition off, an unsplit scan runs serially instead of
+hanging. Checked at 1 km, 500 m, 10 mi, 40 km (12 counties) and the 80 km county fallback (21
+counties): all complete.
+
+### Guard: `pipelines/co-risk/tests/browser_check_parallel_reads.mjs`
+
+A real-browser check, not a stub. It serves the app on localhost:8080, runs Boulder 1 km through
+`query_properties` in real headless Chrome against the published extract on S3, twice, each in
+a fresh profile: once as `engine.js` configures the engine, once with
+`SET datafusion.execution.target_partitions = 1` on the live instance (the pre-fix serial
+read). It reads the three settings back from the live engine's
+`information_schema.df_settings` and fails unless they are 16 / 0 / false, the configured run's
+max concurrent extract GETs is above 1, the serial run's is exactly 1, and both return the same
+10 building ids in the same order. It needs network, so it is run by hand and is not in
+`run_all.sh`: `node pipelines/co-risk/tests/browser_check_parallel_reads.mjs`.
+
+Run 2026-09-25, Chrome 153, macOS 26.5, on this branch:
+
+| run | target_partitions | GETs | max GET concurrency | bytes | ms | ids (sha1) |
+| --- | --- | --- | --- | --- | --- | --- |
+| configured | 16 | 41 | 12 | 3.01 MB | 2,017 | `7b5b8a0691d6` |
+| serial | 1 | 41 | 1 | 3.01 MB | 4,486 | `7b5b8a0691d6` |
+
+PASS, 9 of 9. The same script run with `engine.js` and `sqlbuild.js` reverted to `main`
+reported target_partitions 1, repartition_file_min_size 10485760, round-robin true and max GET
+concurrency 1, and FAILED 4 checks: it catches the regression, which a stub asserting the SET
+strings would not, because it only passes if the engine actually applies them.
+
+### Before and after
+
+Live app `21952ad` (before) against this branch served locally on port 8080 (after); same S3
+extract, same network, 2 runs each, the matched rows identical in both (building ids hashed and
+compared, in order).
+
+| query | requests | GETs | max concurrency | bytes | ms before | ms after |
+| --- | --- | --- | --- | --- | --- | --- |
+| Boulder 1 km | 44 | 41 | 2 → 12 | 3.02 MB | 4,504 / 4,848 | **1,980 / 1,924** |
+| El Paso (Colorado Springs) 1 km | 85 | 82 | 2 → 16 | 5.56 MB | 9,190 / 8,375 | **2,511 / 2,384** |
+| Denver 10 mi (4 counties) | 870 | 858 | 5-7 → 16 | 54.8 MB | 89,569 / 89,169 | **14,184 / 14,399** |
+| Greeley 500 m | 62 | 59 | 2 → 15 | 4.12 MB | 6,539 | **1,990** |
+
+Request counts and bytes do not change: the fix changes when the reads happen, not which. The
+partition count was swept on El Paso 1 km: 8 partitions 2,428 / 2,779 ms, 16 partitions
+2,511 / 2,384 ms, 32 partitions 2,540 / 2,484 ms (capped at 16 in flight by the fetch queue);
+Denver 10 mi at 32 was 15,718 ms. 16 is kept.
+
+### Levers measured and not taken
+
+- **`registerParquetTable({ targetPartitions })` alone** (the only option besides
+  `fileExtension` in the package's `.d.ts`): no effect, 41 serial GETs, 3,989 ms. The session
+  `SET` is what the planner reads.
+- **A JS-side prefetch** of the exact ranges, issued in parallel when the app's HEAD fires and
+  served back to the engine's `fetch` from memory. Measured as a ceiling by replaying the ranges
+  a previous run requested, which is perfect knowledge a real implementation would have to get
+  by parsing the Thrift footer and re-implementing DataFusion's row-group pruning in JS:
+  Boulder 1 km 1,414 / 1,541 ms, El Paso 1 km 2,220 / 2,227 ms, identical rows. That is at most
+  about 0.5 s better than the partitioning fix, for a footer parser plus a pruning copy that
+  must agree with the engine forever. Not worth it.
+- **Fewer columns.** All 10 projected columns are used: 9 are returned to the app and `h3_7` is
+  the prefilter. Per row group (Boulder footer) `building_id` is 40.8 KB and `geom_5070` 18.9 KB
+  of ~61 KB; the 7 score and label columns together are about 1.1 KB. Nothing worth dropping.
+- **Whole-file GET** (`register_parquet_buffer`): rejected earlier, 2.7x the bytes.
+
+### Recommended extract change (not made: regenerating needs a Wherobots runtime)
+
+**Sort each county file by `h3_7` alone, not by `(h3_5, h3_6, h3_7)`.** The current sort does not
+order `h3_7`: the res-6 cell a point falls in is not always the parent of its res-7 cell (6.4% of
+Boulder rows), so `h3_7` descends 88 times down the file and row-group min/max ranges overlap.
+In Boulder 40 of 128 row groups pass the 1 km `h3_7` stats test and all 40 are read, while only
+22 actually hold one of the 7 cells.
+
+Measured with the real engine in headless Chrome on the real Boulder file rewritten three ways
+(pyarrow, ~1,125 rows per group) and served locally with Range support, so bytes and requests
+are comparable and times are not:
+
+| layout | 500 m GETs / bytes | 1 km GETs / bytes | 10 mi GETs / bytes |
+| --- | --- | --- | --- |
+| published file | 41 / 3.00 MB | 41 / 3.00 MB | 129 / 8.41 MB |
+| same order, pyarrow rewrite (writer control) | | 39 / 2.97 MB | |
+| sorted by `h3_7` | 20 / 1.74 MB | **22 / 1.86 MB** | 130 / 8.70 MB |
+
+Same rows in every layout. That is 38% fewer bytes and about half the requests for a selective
+query, and no change at 10 mi, which reads the whole county either way. Not yet measured: a res-6
+query on a county large enough for res-6 pruning to matter under the new sort.
+
+Secondary, if bytes matter more later: `building_id` is a 36-character UUID string and 67% of
+every row group. A 16-byte binary encoding is the next lever to measure; it is a schema change
+(the app would format it back), not a tuning change.
 
 ---
 
@@ -159,6 +305,9 @@ Each of these is a loud comment at the line that depends on it; the short versio
 4. **GeoParquet metadata is ignored** (`sqlbuild.js`). The geometry column arrives as
    `BinaryView`; it needs `ST_GeomFromWKB`, then `ST_SetSRID(..., 5070)`, because the engine
    compares CRS before geometry and a decoded WKB has none.
+5. **Range reads are concurrent only with the scan settings AND a join-free query**
+   (`engine.js`, `sqlbuild.js`). Reintroducing a `pt` CTE makes the reads serial again, and
+   turning round-robin repartition back on can make an unsplit scan hang. See *Range reads*.
 
 ---
 

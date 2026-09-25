@@ -106,8 +106,9 @@
   }
 
   /**
-   * The top-N-within-radius template, before substitution. Written against `co_risk_query` so it
-   * reads the way the plan's worked example reads, and so the substitution has exactly one job.
+   * The top-N-within-radius template, before substitution. Written against `co_risk_query` so the
+   * substitution has exactly one job. It differs from the plan's worked example in one respect:
+   * the query point is inlined rather than a `pt` CTE (see the comment above the return).
    *
    * CRS: the centre is transformed INTO EPSG:5070 and compared against the stored 5070 geometry,
    * so `ST_DWithin(..., 16093.4)` is 16,093.4 METRES. The same geometry is transformed BACK to
@@ -140,9 +141,8 @@
       ids.forEach(function (id) {
         if (!/^\d+$/.test(String(id))) throw new Error("non-numeric H3 cell id: " + id);
       });
-      // Qualified with the caller's alias: the FROM clause also carries `pt`, and an
-      // unqualified column that later exists on both sides is an ambiguous-reference failure
-      // that only shows up once someone adds a column to the other relation.
+      // Qualified with the caller's alias, so the statement stays unambiguous if a second
+      // relation is ever added to the FROM clause.
       prefilter = "b." + opts.cover.column + " IN (" + ids.join(", ") + ")\n" +
                   "  AND ";
     }
@@ -152,18 +152,24 @@
     // executor reports it honestly if a query ever exhausts it.
     var fetchLimit = fetchLimitFor(opts.limit);
 
+    // ⚠️ THE QUERY POINT IS AN INLINE EXPRESSION, NOT A `WITH pt AS (...)` CROSS JOIN. The
+    // planner folds it to a constant either way, but a cross join against `pt` is planned as
+    // SedonaDB's SpatialJoinExec, which drains the scan's partitions one after another. With
+    // the join, every row-group read was a strictly serial HTTP range request whatever
+    // target_partitions was set to (engine.js); as a plain filter the scan's partitions are read
+    // concurrently. Measured in headless Chrome against the real extract, Boulder 1 km: 4.1 s
+    // serial with the join, 1.3 s at 16 partitions without it, same bytes, same rows.
+    var pt = "ST_Transform(ST_Point(" + num(opts.center.lon) + ", " + num(opts.center.lat) +
+             "), 'EPSG:4326', 'EPSG:5070')";
+
     return "" +
-      "WITH pt AS (\n" +
-      "  SELECT ST_Transform(ST_Point(" + num(opts.center.lon) + ", " + num(opts.center.lat) +
-      "), 'EPSG:4326', 'EPSG:5070') AS g\n" +
-      ")\n" +
       "SELECT b.building_id, b.composite, b.wf_score, b.hail_score, b.flood_score,\n" +
       "       b.wind_score, b.access_score, b.county,\n" +
       "       ST_X(ST_Transform(" + GEOM + ", 'EPSG:5070', 'EPSG:4326')) AS lon,\n" +
       "       ST_Y(ST_Transform(" + GEOM + ", 'EPSG:5070', 'EPSG:4326')) AS lat,\n" +
-      "       ST_Distance(" + GEOM + ", pt.g) AS planar_dist_m\n" +
-      "FROM " + RELATION + " b, pt\n" +
-      "WHERE " + prefilter + "ST_DWithin(" + GEOM + ", pt.g, " +
+      "       ST_Distance(" + GEOM + ", " + pt + ") AS planar_dist_m\n" +
+      "FROM " + RELATION + " b\n" +
+      "WHERE " + prefilter + "ST_DWithin(" + GEOM + ", " + pt + ", " +
       num(Math.round(opts.radius_m * PLANAR_SLACK * 10) / 10) + ")\n" +
       "ORDER BY b." + metric + " DESC, b.building_id ASC\n" +
       "LIMIT " + num(fetchLimit) + ";";

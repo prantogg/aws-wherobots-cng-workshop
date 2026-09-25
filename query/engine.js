@@ -70,6 +70,43 @@
   var loading = null;   // the in-flight or settled load, so a second question does not reload
 
   /**
+   * How many byte-range partitions one county file is scanned as.
+   *
+   * ⚠️ THIS IS WHAT MAKES THE RANGE READS CONCURRENT. The engine starts with
+   * target_partitions = 1, so DataFusion scans a file as one stream that requests one row group,
+   * decodes it, then requests the next: every read waited on the previous one (Boulder 1 km:
+   * 41 GETs one at a time, 4.1 s). Splitting the file into N byte ranges gives N streams whose
+   * reads overlap. The JS fetch queue in the engine already allows 16 in flight, so 16 is the
+   * most that can help. Same bytes, same rows; measured in headless Chrome against the real
+   * extract (SPIKE_FINDINGS.md, "Range reads").
+   *
+   * ⚠️ ALL THREE SETTINGS ARE NEEDED, AND THE THIRD ONE IS A SAFETY SETTING.
+   *   - repartition_file_min_size = 0: the default (10 MB) is larger than every county file,
+   *     so without it the file is never split and nothing changes.
+   *   - enable_round_robin_repartition = false: when the file is NOT split, the planner instead
+   *     inserts a RoundRobin RepartitionExec to reach N partitions, and in this WASM build that
+   *     query never completes (measured: no result after 40 s where the serial plan takes 4 s).
+   *     Off, an unsplit scan just runs serially.
+   *   - the query must be a plain filter over the scan: sqlbuild.js inlines the query point for
+   *     this reason, because a cross join is planned as a spatial join that reads its input
+   *     partitions one at a time.
+   */
+  var SCAN_PARTITIONS = 16;
+  function scanSettings(n) {
+    return [
+      "SET datafusion.execution.target_partitions = " + n,
+      "SET datafusion.optimizer.repartition_file_min_size = 0",
+      "SET datafusion.optimizer.enable_round_robin_repartition = false"
+    ];
+  }
+
+  function applySettings(db, statements) {
+    return statements.reduce(function (p, s) {
+      return p.then(function () { return db.sqlJSON(s); });
+    }, Promise.resolve());
+  }
+
+  /**
    * Refuse to run a binary that is not the one this app was built against.
    *
    * Falls back to starting WITHOUT the check only where SubtleCrypto is unavailable, which in
@@ -132,6 +169,10 @@
             return mod.CereusDB.create({ wasmSource: new Uint8Array(buf) });
           });
         });
+      })
+      .then(function (db) {
+        return applySettings(db, scanSettings(SCAN_PARTITIONS))
+          .then(function () { return db; });
       })
       .then(function (db) {
         // Keyed by table name, holding the in-flight PROMISE rather than a boolean. A boolean
