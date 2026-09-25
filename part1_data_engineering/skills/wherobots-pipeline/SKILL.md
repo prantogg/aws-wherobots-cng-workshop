@@ -356,7 +356,7 @@ for the `INDUSTRY_FACTORS` pattern.
 
 **Score explanation JSON**: every Gold row carries a `score_explanation`
 STRING column with factor values, weights, AND source column names — so
-downstream consumers (Felt, psycopg2 queries) can tell which raw column
+downstream consumers (map popups, analyst queries) can tell which raw column
 drove each factor. See `gold-scoring.md` for the `to_json(struct(...))`
 pattern.
 

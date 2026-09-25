@@ -4,40 +4,40 @@ See the root `CLAUDE.md` for the full project overview.
 
 ## Quick Reference
 
-- **Agent**: `agent.py` — Strands Agent (Bedrock Claude) with Felt MCP tools + python_repl fallback
-- **Skills**: `skills/felt-mapping/` (MCP tool docs) and `skills/aurora-postgis/` (fallback)
-- **Run**: `./run.sh "your prompt"` or `./run.sh` for interactive mode
+- **Agent**: `agent.py` — Strands Agent (Bedrock Claude) with the Wherobots MCP plus two map tools
+- **Skill**: `skills/open-mapping/` (map spec format, styling expressions, tier palette)
+- **Viewer**: `viewer/index.html` — MapLibre GL JS on an OpenFreeMap basemap
+- **Run**: `./run.sh "your prompt"` or `./run.sh` for interactive mode, then open http://localhost:8765
 
 ## Architecture
 
 ```
-User prompt → Strands Agent → Felt MCP tools → Aurora (SQL) → Felt Map
-                           ↘ python_repl (fallback for complex transforms)
+User prompt → Strands Agent → Wherobots MCP (SQL on org_catalog.gold)
+                            → write_layer  → viewer/maps/<map_id>/<layer>.geojson
+                            → publish_map  → viewer/maps/<map_id>/map.json + maps/current.json
+                            → MapLibre viewer on localhost:8765 (updates after every answer)
 ```
 
-**Primary path (Felt MCP):**
-1. `list_data_sources` → find Aurora connection
-2. `create_map` → new map
-3. `create_layer_from_data_source` → SQL query
-4. `poll_layer_processing_status` → wait
-5. `generate_fsl` → AI styling
-6. `update_layer_properties` → apply style
-7. `render_map` → inline preview
+1. The agent explores tables and tests SQL with the Wherobots MCP tools when it needs to.
+2. `write_layer(map_id, layer_id, sql)` runs the final query (results capped at 10,000 rows),
+   saves it as GeoJSON and returns column stats the agent uses for colour stops.
+3. `publish_map(map_id, spec)` validates and writes the map spec, and points
+   `maps/current.json` at it. The viewer polls that file and swaps in the new map.
 
-**Fallback (python_repl):**
-- MCP upload fails → `felt_python.upload_file()`
-- Complex transforms → pandas/geopandas
-- Debug connectivity → psycopg2
+`http://localhost:8765/?map=maps/<map_id>/map.json` opens one fixed map (a permalink).
 
-## Data (pre-loaded in Aurora, `workshop` schema)
+## Data (Gold Iceberg tables from Part 1)
 
-4 Gold tables, ~1M San Diego buildings each:
-- `workshop.insurance_exposure` — risk_tier, wildfire/flood/weather factors, triage_priority
-- `workshop.cre_risk` — risk_tier, acquisition_screen_flag, exposure_magnitude_index
-- `workshop.capital_markets_signals` — disruption_signal, supply_chain_vulnerability (no risk_tier)
-- `workshop.energy_asset_risk` — risk_tier, outage_probability, wildfire_ignition_risk
+4 Gold tables in `org_catalog.gold`, ~1M San Diego County buildings each:
+- `insurance_exposure` — risk_tier, wildfire/flood/weather factors, triage_priority
+- `cre_risk` — risk_tier, acquisition_screen_flag, exposure_magnitude_index
+- `capital_markets_signals` — disruption_signal, supply_chain_vulnerability (no risk_tier)
+- `energy_asset_risk` — risk_tier, outage_probability, wildfire_ignition_risk
 
-## MCP Servers
+## Configuration (`.env`)
 
-- **Felt**: `https://felt.com/mcp` — Primary for map operations
-- **Wherobots**: `https://api.cloud.wherobots.com/mcp/` — Part 1 data engineering
+- `WHEROBOTS_API_KEY` — Wherobots MCP access
+- `WHEROBOTS_RUNTIME_ID` — SQL session runtime (e.g. `micro`); unset uses the org default
+- `GOLD_DB` — catalog database with the Gold tables (default `gold`)
+- `BEDROCK_MODEL_ID`, `AWS_DEFAULT_REGION` and AWS credentials — the agent's model
+- `MAP_VIEWER_PORT` — viewer port (default `8765`)

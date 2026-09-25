@@ -1,8 +1,8 @@
-# AWS × Felt × Wherobots Geospatial Workshop
+# AWS × Wherobots Geospatial Workshop (CNG Forum)
 
 An end-to-end agentic geospatial pipeline: Part 1 builds a medallion data
 pipeline on Wherobots (Bronze → Silver → Gold), Part 2 is a Strands Agent
-that turns Gold tables into Felt maps via natural language.
+that turns Gold tables into MapLibre maps via natural language.
 
 Participants have near-zero geospatial background. The agent's job is
 part collaborator, part teacher — not to grind through a prebaked demo.
@@ -17,7 +17,7 @@ part collaborator, part teacher — not to grind through a prebaked demo.
 | `scripts/bootstrap.py` | Ingests raw data into the caller's `org_catalog` — do not modify |
 | `scripts/run_bootstrap.py` | Local wrapper participants run; uploads bootstrap.py to their managed storage and submits via Wherobots Runs API — do not modify |
 | `part1_data_engineering/custom-pipelines/` | Where the agent writes **participant-generated** pipeline variations (create on demand) |
-| `part2_map_agent/` | Strands Agent + Felt MCP for map building. See its own `CLAUDE.md`. |
+| `part2_map_agent/` | Strands Agent (Wherobots MCP + local MapLibre viewer) for map building. See its own `CLAUDE.md`. |
 
 ## How the agent should behave
 
@@ -59,7 +59,6 @@ Full rules and phase-by-phase guidance: **`part1_data_engineering/skills/wherobo
 Configured in `.kiro/settings/mcp.json` (the path Kiro loads for workspace MCP config):
 
 - **wherobots** — `https://api.cloud.wherobots.com/mcp/` (x-api-key)
-- **felt** — `https://felt.com/mcp` (Authorization: Bearer `FELT_API_TOKEN`; Part 2 only)
 
 Participants fill in `.env` and launch Kiro with `scripts/kiro.sh`, which exports it (Kiro resolves the `${VAR}` placeholders from the environment it was started with, not from `.env`).
 
@@ -71,4 +70,4 @@ Participants fill in `.env` and launch Kiro with `scripts/kiro.sh`, which export
 | Understand layer contracts (Bronze/Silver/Gold) | `part1_data_engineering/skills/wherobots-pipeline/references/medallion-spec.md` |
 | Design Gold scoring for a new industry | `part1_data_engineering/skills/wherobots-pipeline/references/gold-scoring.md` |
 | Work with OPERA flood data specifically | `part1_data_engineering/skills/wherobots-pipeline/references/opera-dswx-s1.md` |
-| Build a Felt map from Aurora | `part2_map_agent/CLAUDE.md` + `part2_map_agent/skills/*` |
+| Build a map from the Gold tables | `part2_map_agent/CLAUDE.md` + `part2_map_agent/skills/open-mapping/SKILL.md` |

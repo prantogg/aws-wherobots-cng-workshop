@@ -1,14 +1,7 @@
 strands-agents>=1.33.0
 strands-agents-bedrock>=0.0.1
-strands-agents-tools>=0.2.23
-mcp
-felt-python
+mcp>=2
 geopandas
-pandas
 shapely
-requests
 python-dotenv
 pyarrow
-psycopg2-binary
-sqlalchemy
-geoalchemy2
