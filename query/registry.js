@@ -12,7 +12,7 @@
  *      so the "reads a handful of counties, never the state" claim does not rest on an engine
  *      behaviour nobody measured.
  *   2. Registering a directory needs a bucket LISTING, and anonymous ListObjectsV2 is 403 on the
- *      public tiles bucket by design (see SPIKE_FINDINGS.md blocker B1). A per-file URL is the
+ *      public tiles bucket by design (see "A retraction" in SPIKE_FINDINGS.md). A per-file URL is the
  *      only registration shape that can work there at all.
  *
  * THE COUNTY SELECTION IS A SUPERSET, THE SAME WAY THE H3 SET IS. It is every county whose extent
