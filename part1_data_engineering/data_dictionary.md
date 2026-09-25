@@ -270,10 +270,9 @@ Target audience: Utility grid planners, pipeline operators, energy reliability t
 
 ## Output Destinations
 
-Each Gold table is written to three destinations:
+Each Gold table is written to up to two destinations:
 
 | Destination | Format | Path / Location |
 |---|---|---|
 | Wherobots Iceberg | Apache Iceberg | `org_catalog.gold.<table_name>` |
 | S3 GeoParquet (optional) | GeoParquet | `GEOPARQUET_BASE/<table_name>` — off by default; set `GEOPARQUET_BASE` in the silver-to-gold config cell to a folder in your org's Wherobots managed storage to enable |
-| Aurora PostgreSQL | JDBC / PostGIS | `workshop.<table_name>` (geometries stored as WKT) |

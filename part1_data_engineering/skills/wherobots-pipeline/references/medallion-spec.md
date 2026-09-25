@@ -10,7 +10,7 @@ Use these contracts when designing the pipeline (Phase 3) and when auditing gene
 1. **Each layer is independently materializable.** Reprocessing Silver does not require reprocessing Bronze.
 2. **Each table is independently materializable.** Reprocessing one Silver enrichment table does not require reprocessing others.
 3. **No circular dependencies.** Data flows strictly: Raw -> Bronze -> Silver -> Gold -> Output.
-4. **Every table is an Apache Iceberg table** (except final output destinations like GeoParquet/JDBC).
+4. **Every table is an Apache Iceberg table** (except final output destinations like GeoParquet).
 5. **Geometry column is always named `geometry`.**
 6. **All timestamps are UTC.**
 
@@ -237,14 +237,12 @@ Each Gold table is written to **at least** one destination. Typical destinations
 |-------------|--------|-------------|
 | Wherobots Iceberg | `org_catalog.gold.<table>` | Always — primary persistence for reprocessing and querying |
 | S3 GeoParquet | `s3://<bucket>/gold/<table>` | When downstream consumers need file-based access |
-| Aurora PostgreSQL | `workshop.<table>` via JDBC | When serving to web applications or map platforms |
 
 ### Write Order
 
 Always write in this order:
 1. Iceberg (primary — if this fails, stop)
-2. GeoParquet (secondary — portable format)
-3. JDBC (tertiary — serving layer, optional)
+2. GeoParquet (secondary — portable format, optional)
 
 ---
 
