@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workshop Map</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.css">
+  <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pmtiles@4.3.0/dist/pmtiles.js"></script>
+  <style>
+    html, body, #map { margin: 0; height: 100%; font: 13px/1.4 system-ui, sans-serif; }
+    #panel { position: absolute; top: 12px; left: 12px; max-width: 320px; padding: 10px 12px;
+             background: rgba(20, 20, 24, .88); color: #eee; border-radius: 6px; }
+    #panel h1 { font-size: 15px; margin: 0 0 4px; }
+    #panel p { margin: 0 0 8px; color: #bbb; }
+    .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+    .swatch { width: 12px; height: 12px; border-radius: 2px; flex: none; }
+    #error { color: #ff8a80; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel"><h1 id="title">Loading…</h1><p id="desc"></p><div id="legend"></div><div id="error"></div></div>
+<script>
+// Renders a "map spec" JSON written by the Part 2 agent:
+// { title, description, center: [lng, lat], zoom, basemap: "dark"|"light",
+//   sources: {<MapLibre sources>}, layers: [<MapLibre layers>],
+//   legend: [{ label, color }], popup: ["prop", ...] }
+// Open with ?map=<url or path to map spec> for a fixed map, or with no parameter to follow
+// maps/current.json, which the agent rewrites on every publish. Relative source URLs
+// resolve against the spec.
+const BASEMAPS = {
+  dark: 'https://tiles.openfreemap.org/styles/dark',
+  light: 'https://tiles.openfreemap.org/styles/positron',
+};
+
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol('pmtiles', protocol.tile);
+
+const $ = (id) => document.getElementById(id);
+
+function absolutize(url, base) {
+  if (url.startsWith('pmtiles://')) return 'pmtiles://' + new URL(url.slice(10), base).href;
+  return new URL(url, base).href;
+}
+
+const map = new maplibregl.Map({ container: 'map', style: BASEMAPS.dark, center: [-117.1, 32.8], zoom: 9 });
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
+map.on('error', (e) => { $('error').textContent = e.error?.message || String(e.error); });
+let basemap = BASEMAPS.dark;
+let overlay = { sources: [], layers: [], popup: [] };
+
+// Popups and pointer cursor work across map swaps by reading the current overlay.
+const activeLayers = () => overlay.layers.filter((id) => map.getLayer(id));
+map.on('click', (e) => {
+  const f = map.queryRenderedFeatures(e.point, { layers: activeLayers() })[0];
+  if (!f) return;
+  const keys = overlay.popup.length ? overlay.popup : Object.keys(f.properties);
+  const html = keys.map((k) => `<b>${k}</b>: ${f.properties[k] ?? '—'}`).join('<br>');
+  new maplibregl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
+});
+map.on('mousemove', (e) => {
+  const hit = map.queryRenderedFeatures(e.point, { layers: activeLayers() }).length > 0;
+  map.getCanvas().style.cursor = hit ? 'pointer' : '';
+});
+
+function showSpec(spec, specUrl, moveCamera) {
+  document.title = spec.title || 'Workshop Map';
+  $('title').textContent = spec.title || '';
+  $('desc').textContent = spec.description || '';
+  $('error').textContent = '';
+  $('legend').innerHTML = '';
+  for (const { label, color } of spec.legend || []) {
+    $('legend').insertAdjacentHTML('beforeend',
+      `<div class="row"><span class="swatch" style="background:${color}"></span>${label}</div>`);
+  }
+
+  const addOverlay = () => {
+    for (const id of overlay.layers) if (map.getLayer(id)) map.removeLayer(id);
+    for (const id of overlay.sources) if (map.getSource(id)) map.removeSource(id);
+    for (const [id, src] of Object.entries(spec.sources || {})) {
+      const s = { ...src };
+      if (typeof s.url === 'string') s.url = absolutize(s.url, specUrl);
+      if (typeof s.data === 'string') s.data = absolutize(s.data, specUrl);
+      map.addSource(id, s);
+    }
+    for (const layer of spec.layers || []) map.addLayer(layer);
+    overlay = {
+      sources: Object.keys(spec.sources || {}),
+      layers: (spec.layers || []).map((l) => l.id),
+      popup: spec.popup || [],
+    };
+  };
+  const style = BASEMAPS[spec.basemap] || BASEMAPS.dark;
+  if (style !== basemap) {
+    // setStyle drops our layers; re-add them once the new basemap is ready.
+    basemap = style;
+    overlay = { sources: [], layers: [], popup: [] };
+    map.once('style.load', addOverlay);
+    map.setStyle(style, { diff: false });
+  } else if (map.isStyleLoaded()) {
+    addOverlay();
+  } else {
+    map.once('load', addOverlay);
+  }
+  if (moveCamera) map.jumpTo({ center: spec.center || map.getCenter(), zoom: spec.zoom ?? map.getZoom() });
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Could not load ${url}: HTTP ${res.status}`);
+  return res.json();
+}
+
+async function followLatest() {
+  const pointerUrl = new URL('maps/current.json', location.href).href;
+  let seen = null;
+  let shownId = null;
+  $('title').textContent = 'No map yet';
+  $('desc').textContent = 'Ask the map agent a question; this page updates with each answer.';
+  for (;;) {
+    try {
+      const ptr = await fetchJson(pointerUrl);
+      if (ptr.updated !== seen) {
+        seen = ptr.updated;
+        const specUrl = new URL(ptr.map, location.href).href;
+        showSpec(await fetchJson(specUrl), specUrl, ptr.id !== shownId);
+        shownId = ptr.id;
+      }
+    } catch (err) {
+      // No map published yet (404) or a publish in progress; try again shortly.
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
+async function main() {
+  const specParam = new URLSearchParams(location.search).get('map');
+  if (!specParam) return followLatest();
+  const specUrl = new URL(specParam, location.href).href;
+  showSpec(await fetchJson(specUrl), specUrl, true);
+}
+
+main().catch((err) => { $('title').textContent = 'Map failed to load'; $('error').textContent = err.message; });
+</script>
+</body>
+</html>

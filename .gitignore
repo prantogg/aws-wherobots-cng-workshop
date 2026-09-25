@@ -13,3 +13,4 @@ tmp/screenshots/*.png
 !screenshots/*.png
 CLAUDE.md
 tmp/
+part2_map_agent/viewer/maps/
