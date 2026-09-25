@@ -45,7 +45,7 @@
  *
  * ⚠️ THE ENGINE LOADS ON THE MAIN THREAD, LAZILY: never on page load, and started when the
  * copilot opens (index.html warmQueryEngine) so the download overlaps the first model turn.
- * That is a deliberate v1 tradeoff: it is roughly 6 MB brotli and compiling it briefly blocks
+ * That is a deliberate v1 tradeoff: it is 10.6 MB brotli on the wire and compiling it briefly blocks
  * the UI.
  * Putting it in a module Worker is the next step, and the only reason it is not here yet is that
  * it adds a message protocol to something that otherwise has none. Nothing else in the app

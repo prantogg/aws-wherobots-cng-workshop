@@ -1368,7 +1368,7 @@ const mapTools = {
   }
 };
 
-// The engine is ~6 MB brotli (45 MB raw), so it never loads on page load: map-only visitors
+// The engine is 10.6 MB brotli on the wire (45 MB raw), so it never loads on page load: map-only visitors
 // never pay for it. It starts downloading when the COPILOT OPENS (warmQueryEngine), so the
 // download overlaps with the user typing and the model's first turn instead of starting only
 // once a data question arrives. Measured on the live app: it was the single largest item in a

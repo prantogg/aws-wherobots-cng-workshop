@@ -212,13 +212,42 @@ git history if the labs build is ever re-evaluated.
 
 ## What is still unverified
 
-- **Safari and Firefox.** Everything here ran in Node and in headless Chrome. The package uses
-  no JSPI and the transport is ordinary wasm-bindgen async, so there is no known reason it would
-  differ, but "no known reason" is not a test.
-- **Cold-load cost in front of a real user.** The engine is ~6 MB brotli and loads lazily on the
-  first data question. Locally it is 328 ms end to end, but that is a local fetch; it has not
-  been measured on a cold cache over a slow connection.
-- **Firefox and Safari** remain the only genuinely untested surface.
+- **Safari: still unverified, blocked on one setting only Ben can change.** Safari 26.5.2 is
+  installed, but `safaridriver` refuses a session: "You must enable 'Allow remote automation' in
+  the Developer section of Safari Settings to control Safari via WebDriver." Nothing was done to
+  work around it. Once it is on, the same query can be driven through `safaridriver`.
+- **Firefox: now verified.** Firefox 155.0.1, headless, driven over its own WebDriver BiDi
+  endpoint (`--remote-debugging-port`, no geckodriver), fresh profile per run, through
+  `window.mapTools.query_properties` against the published extract on S3. Every run returned the
+  same rows as Chrome (building ids hashed and compared in order). Before is the live app
+  (`21952ad`); after is the concurrent-reads change (PR #61) served on localhost:8080.
+
+  | query | GETs | max concurrency | bytes | ms |
+  | --- | --- | --- | --- | --- |
+  | Boulder 1 km, live | 41 | 1 | 3.02 MB | 4,499 |
+  | Boulder 1 km, PR #61 | 41 | 12 | 3.01 MB | 1,548 / 1,611 |
+  | El Paso 1 km, live | 82 | 1 | 5.56 MB | 9,008 |
+  | El Paso 1 km, PR #61 | 82 | 16 | 5.56 MB | 2,188 |
+  | Denver 10 mi, PR #61 | 858 | 16 | 54.7 MB | 13,448 |
+
+  One run per row, except Boulder with PR #61, which was run twice (two runs, two timings).
+  Engine load in a fresh Firefox profile against the live app: 1,166 and 1,068 ms (two runs).
+- **Cold-load cost: now measured, and the engine is larger on the wire than this document said.**
+  Earlier text called it "~6 MB brotli". Measured: jsdelivr serves `cereusdb_bg.wasm` as brotli
+  at **10.63 MB** (`curl` with `Accept-Encoding: br`, `content-length: 10633260`; gzip is
+  12.29 MB), and a cold load moves 10.65 MB across 5 CDN requests. Headless Chrome 153, fresh
+  profile, live app, timing `CoRiskQuery.engine.load()` (glue import, wasm fetch, SHA-256,
+  compile):
+
+  | link | load time |
+  | --- | --- |
+  | unthrottled (13.5 MB/s measured) | 1,124 / 1,050 ms |
+  | CDP-throttled 10 Mbps, 50 ms latency | 9,903 ms |
+  | CDP-throttled 2 Mbps, 150 ms latency | 46,449 ms |
+
+  The throttled rows are Chrome's network emulation on this Mac, not a real mobile link. They
+  show the download dominates on a slow link: warming the engine when the copilot opens hides
+  about 10 s on a 10 Mbps connection only if the user takes that long to ask.
 
 ---
 
