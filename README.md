@@ -53,6 +53,15 @@ The H3 layer shades **building density** (its primary styling field); the peril 
 render on parcels and buildings as you zoom in. Counts (hex 24,868 / parcels 2,720,180 /
 buildings 2,771,126) are taken from the handoffs; nothing is recomputed.
 
+## Places (cities, CDPs, county remainders)
+
+`places.json` is the per-place rollup (545 places, every building counted once), fetched once
+and ranked in the browser by `places.js`; the copilot's `find_top_places` / `focus_place`
+return only the top rows. The **Places** toggle draws the boundaries from
+`co_places_geo.json`, read from the tile bucket (`TILES_BASE`) with a same-origin fallback for
+local runs. Build notes and the measured overlaps: `pipelines/co-risk/README.md`, "Places".
+Real-browser check: `node pipelines/co-risk/tests/browser_check_places.mjs`.
+
 ## Deploy
 
 Deploy the single `index.html` to Vercel (its `*.vercel.app` origin is already in the

@@ -69,8 +69,41 @@ const QUERY_TOOLS = [
     }, required: ["radius_m"] } }
 ];
 
-const ALL_TOOLS = TOOLS.concat(QUERY_TOOLS);
-const FULL_SYSTEM = SYSTEM + ASK_THE_DATA_GUIDANCE;
+// ---- Places: city / CDP / county-remainder rollup ----------------------------------------
+// Same additive pattern as "Ask the data" above. The rollup itself (545 places) never goes to
+// the model: the browser ranks it and returns only the top-N rows a tool call asks for.
+const PLACE_GUIDANCE = [
+  "",
+  "",
+  "PLACES (cities and towns): for questions about cities, towns or communities -- 'which cities have the most wildfire risk', 'top towns for hail', 'which cities have the most risks and what are they', 'how exposed is Evergreen' -- use find_top_places and focus_place. The place table covers every scored building exactly once: incorporated cities and towns (type 'city'), Census Designated Places, i.e. named unincorporated communities such as Highlands Ranch, Evergreen or Black Forest (type 'cdp'), and one 'Unincorporated <County> County' remainder per county (type 'remainder') for buildings outside every city and CDP. Place numbers from these tools are authoritative; quote them, never invent others.",
+  "RANKING: rank by the COUNT of buildings elevated for the peril and show the share alongside (by:'count', the default). Rank by share only when the user asks for share or percentage; share ranking skips places under the tool's minimum-building floor so a tiny hamlet at 100% does not outrank a city -- say so when you use it. Never rank by dollars.",
+  "PERIL 'any': a building elevated for at least one of the five perils, counted once. Use it for 'most risks' / 'riskiest cities' across perils, then name WHAT the risks are from elevated_by_peril (for example: mostly hail and wind, little wildfire). elevated_two_plus_perils counts buildings elevated for two or more perils.",
+  "WORDING: say 'city or town' for type city, 'unincorporated community (CDP)' for cdp, and name remainders as 'unincorporated <County> County'. When a remainder ranks high, say plainly that it is the unincorporated part of the county, not a city. Every place count is a FLOOR (the building spine is not a complete census): say so once per answer. Say 'elevated', never 'insurable' or 'uninsurable'.",
+  "COUNTY FILTER: with county set, a place that spans several counties is matched on any overlap, but its counts are for the WHOLE place, never just that county's slice. Such rows carry count_scope (and spans_counties, the counties as measured): say so in the answer whenever one appears, and take county lists only from those fields.",
+  "MAP: find_top_places marks the returned places on the map; focus_place frames one place, outlines it and opens its popup. The Places boundary layer is a toggle the user controls."
+].join("\n");
+
+const PLACE_TOOLS = [
+  { name: "find_top_places",
+    description: "Rank Colorado places (incorporated cities/towns, CDPs, and per-county unincorporated remainders) by the number of buildings elevated for one peril, or 'any' peril. Returns the top N with buildings, elevated count, share, and every peril's elevated count and share, and marks them on the map.",
+    input_schema: { type: "object", properties: {
+      peril: { type: "string", enum: ["wildfire", "hail", "flood", "wind", "access", "any"],
+               description: "Peril to rank by. 'any' = buildings elevated for at least one peril, counted once." },
+      by: { type: "string", enum: ["count", "share"], description: "Default 'count'. Use 'share' only when the user asks for share/percentage." },
+      n: { type: "integer", description: "How many places to return (1-25, default 10)." },
+      county: { type: "string", description: "Optional: only places in this county (a place spanning counties matches each one)." },
+      type: { type: "string", enum: ["city", "cdp", "any"], description: "'city' = incorporated only, 'cdp' = Census Designated Places only, 'any' (default) = cities, CDPs and unincorporated county remainders." },
+      min_buildings: { type: "integer", description: "Share ranking only: override the minimum buildings a place needs to be ranked. Omit to use the default floor." }
+    }, required: ["peril"] } },
+  { name: "focus_place",
+    description: "Fly to one Colorado place by name (city, town, CDP, or 'Unincorporated <County> County'), outline it and open its popup. Returns its buildings and every peril's elevated count and share.",
+    input_schema: { type: "object", properties: {
+      name: { type: "string", description: "Place name, e.g. 'Evergreen', 'Colorado Springs', 'Unincorporated Jefferson County'." }
+    }, required: ["name"] } }
+];
+
+const ALL_TOOLS = TOOLS.concat(QUERY_TOOLS, PLACE_TOOLS);
+const FULL_SYSTEM = SYSTEM + ASK_THE_DATA_GUIDANCE + PLACE_GUIDANCE;
 
 export default async function handler(req, res){
   // CORS must come before the POST check: a preflight is OPTIONS, and answering it with 405

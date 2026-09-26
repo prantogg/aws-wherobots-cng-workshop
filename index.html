@@ -9,6 +9,7 @@
 <script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
 <script src="counties.js"></script>
 <script src="counties_geo.js"></script>
+<script src="places.js"></script>
 <!-- "Ask the data": spatial SQL in the browser over the GeoParquet extract. Plain scripts, no
      build step. h3-js is pinned (version, URL and sha256 live in query/h3cover.js) and the
      engine itself is loaded lazily, only when someone actually asks a data question. -->
@@ -196,6 +197,7 @@
   <div class="submode" id="submode" style="display:none"></div>
   <div class="submode" id="floodmode" style="display:none"></div>
   <div class="submode" id="basemapmode"></div>
+  <div class="submode" id="placemode"></div>
   <div class="zoom" id="zoom">Statewide</div>
 </div>
 
@@ -274,6 +276,8 @@
 //   const TILES_BASE = "https://dxxxx.cloudfront.net/";
 const TILES_BASE = "https://co-pc-risk-tiles-benp-uw2.s3.us-west-2.amazonaws.com/tiles/";
 const FILES = { hex:"co_hex.pmtiles", parcels:"co_parcels.pmtiles", buildings:"co_buildings.pmtiles" };
+// Place boundaries (~0.96 MB) sit next to the tiles; the rollup (places.json) ships with the app.
+const PLACES_GEO_FILE = "co_places_geo.json";
 // ------------------------------------------------------------------------
 
 // Peril config. Score domains are correctness, not taste:
@@ -661,6 +665,8 @@ map.on("load", ()=>{
     }
   });
 
+  addPlaceLayers();
+
   // Copilot hex-highlight overlay (always on top): marks the H3 cells the LLM surfaces.
   map.addSource("hexhl", { type:"geojson", data:{type:"FeatureCollection",features:[]} });
   map.addLayer({
@@ -692,6 +698,7 @@ map.on("load", ()=>{
   // numbers are plain DOM instead.
   // Load the 24,868-cell H3 rollup for the copilot's hex tools (queried in-browser, never sent to the LLM).
   fetch("hexes.json").then(r=>r.json()).then(d=>{ window.HEXES=d; }).catch(()=>{});
+  loadPlaceRows();
 
   wireInteractions();
   detectTileErrors();
@@ -762,6 +769,7 @@ function applyPeril(){
   map.setPaintProperty("hex-fill","fill-color", hexFillColor(active));
   map.setPaintProperty("parcels-fill","fill-color", parcelFillColor(active));
   map.setPaintProperty("buildings-circle","fill-color", buildingCircleColor(active));
+  if(map.getLayer("place-fill")) map.setPaintProperty("place-fill","fill-color", placeFillColor(active));
   applyPerilFilters();
   renderLegend();
   if(typeof updatePanTally==="function") updatePanTally();
@@ -1253,7 +1261,7 @@ function geomBounds(g){
 }
 
 function wireInteractions(){
-  const clickable = ["buildings-circle","parcels-fill","hex-fill","county-fill"];
+  const clickable = ["buildings-circle","parcels-fill","place-fill","hex-fill","county-fill"];
   map.on("mousemove", e=>{
     const f = map.queryRenderedFeatures(e.point,{layers:clickable.filter(l=>map.getLayer(l))});
     map.getCanvas().style.cursor = f.length ? "pointer" : "";
@@ -1265,6 +1273,7 @@ function wireInteractions(){
       if(fs.length){
         const f = fs[0];
         if(layer==="county-fill"){ selectCounty(f.properties.county, true); return; }
+        if(layer==="place-fill"){ showPlacePopup(f.properties.place_id, e.lngLat); return; }
         // Drill-in on click: frame the clicked feature as well as showing its popup.
         // Hex -> parcel level (~z12-13); parcel -> building level (z14+).
         if(layer==="hex-fill"){ const b=geomBounds(f.geometry); if(b) map.fitBounds(b,{padding:60, maxZoom:13, duration:900}); }
@@ -1512,6 +1521,138 @@ function copBubble(role, text){ const d=document.createElement("div"); d.classNa
 let copThinkEl=null;
 function copThink(on, text){ if(on){ if(!copThinkEl){ copThinkEl=copBubble("assistant",text||"Thinking…"); copThinkEl.classList.add("thinking"); } else { copThinkEl.textContent=text||"Thinking…"; } cop.list.scrollTop=cop.list.scrollHeight; } else if(copThinkEl){ copThinkEl.remove(); copThinkEl=null; } }
 const TOOL_LABEL={ set_peril:i=>"Switching to "+(i.peril==="all"?"all perils":i.peril), set_all_mode:i=>"Switching to "+i.mode+" view", fly_to_county:i=>"Flying to "+i.county, focus_county:i=>"Focusing "+i.county, clear_focus:()=>"Clearing focus", fit_colorado:()=>"Zooming to Colorado", get_map_state:()=>"Checking the map", find_hexes:i=>"Finding worst "+(i.peril==="all"?"":i.peril+" ")+"cells"+(i.county?" in "+i.county:" statewide"), clear_hex_highlight:()=>"Clearing highlights", geocode:i=>"Locating "+i.place, query_properties:i=>"Querying the data around "+(i.place_label||i.place||"that point") };
+
+// ---- Places: cities, Census Designated Places, county remainders ----------------------
+// Rollup built by pipelines/co-risk/analysis/04_places.py: every scored building sits in
+// exactly ONE place (incorporated city first, then CDP, else "Unincorporated <County>
+// County"), so place totals reconcile to the statewide 2,771,126. The rollup (places.json)
+// is fetched once and queried here; the copilot only ever receives the top-N rows a tool
+// returns. The boundary layer is off by default and loads on first use.
+const PLACE_FLOOR_NOTE = "Counts are floors: the Overture-derived building spine is not a " +
+  "complete structure census. 'Elevated' is the same per-peril definition the hex layer uses.";
+const PLACE_TYPE_LABEL = { city:"Incorporated city / town", cdp:"Census Designated Place (unincorporated)",
+                           remainder:"County remainder (outside every city and CDP)" };
+let placeRowsById = null, placeGeoPromise = null, placesOn = false;
+
+function loadPlaceRows(){
+  return fetch("places.json").then(r=>{ if(!r.ok) throw new Error("places.json " + r.status); return r.json(); })
+    .then(d=>{ window.PLACES = CoRiskPlaces.decode(d); window.PLACES_META = d.meta;
+               placeRowsById = new Map(window.PLACES.map(p=>[p.place_id, p])); })
+    .catch(e=>{ console.warn("place rollup unavailable:", e.message); });
+}
+// Boundaries live next to the tiles on S3; a same-origin copy is the fallback for local runs.
+function loadPlaceGeo(){
+  if(placeGeoPromise) return placeGeoPromise;
+  const get = u => fetch(u).then(r=>{ if(!r.ok) throw new Error(u + " " + r.status); return r.json(); });
+  placeGeoPromise = Promise.all([get(TILES_BASE + PLACES_GEO_FILE).catch(()=>get(PLACES_GEO_FILE)),
+                                 placeRowsById ? null : loadPlaceRows()])
+    .then(([geo])=>{
+      // Rollup counts are promoted onto each feature (top-level, so expressions can read them).
+      for(const f of geo.features){
+        const r = placeRowsById && placeRowsById.get(f.properties.place_id);
+        if(r) Object.assign(f.properties, { buildings:r.buildings, wf_elev:r.wf_elev, hail_elev:r.hail_elev,
+          flood_elev:r.flood_elev, wind_elev:r.wind_elev, access_elev:r.access_elev, any_elev:r.any_elev });
+      }
+      const src = map.getSource("places"); if(src) src.setData(geo);
+      return geo;
+    })
+    .catch(e=>{ placeGeoPromise = null; throw e; });
+  return placeGeoPromise;
+}
+// Shaded like the county choropleth: the ACTIVE peril's elevated share. "All perils" uses the
+// share elevated for at least one peril (risk) or the building count (exposure).
+function placeFillColor(k){
+  const shareOf = f => ["/", g(f), ["max", g("buildings"), 1]];
+  if(k==="all") return allMode==="risk"
+    ? ["interpolate",["linear"], shareOf("any_elev"), 0,SAFE, 0.5,"#fdae61", 0.9,"#b30000"]
+    : ["interpolate",["linear"], g("buildings"), 0,EXP[0], 1000,EXP[1], 20000,EXP[2], 150000,EXP[3]];
+  return ["interpolate",["linear"], shareOf(HEXELEV[k]), 0,SAFE, PTOP[k],elevColorOf(k)];
+}
+function addPlaceLayers(){
+  map.addSource("places", { type:"geojson", data:{type:"FeatureCollection",features:[]}, promoteId:"place_id" });
+  const vis = placesOn ? "visible" : "none";   // honours a toggle clicked before the map loaded
+  map.addLayer({ id:"place-fill", type:"fill", source:"places", layout:{visibility:vis},
+    paint:{ "fill-color":placeFillColor(active),
+            "fill-opacity":["interpolate",["linear"],["zoom"], 5,0.75, 11,0.45, 14,0.15] } });
+  map.addLayer({ id:"place-line", type:"line", source:"places", layout:{visibility:vis},
+    paint:{ "line-color":"#2b2b2b", "line-width":["interpolate",["linear"],["zoom"], 6,0.4, 12,1.4], "line-opacity":0.8 } });
+  // Focus outline: visible whether or not the layer toggle is on.
+  map.addLayer({ id:"place-sel", type:"line", source:"places", filter:["==",["get","place_id"],"__none__"],
+    paint:{ "line-color":"#c026d3", "line-width":3 } });
+}
+function setPlacesVisible(on){
+  placesOn = on;
+  for(const id of ["place-fill","place-line"]) if(map.getLayer(id)) map.setLayoutProperty(id,"visibility", on?"visible":"none");
+  const b = document.querySelector("#placemode button"); if(b) b.classList.toggle("on", on);
+  if(on) loadPlaceGeo().catch(e=>showQueryNotice("Place boundaries could not be loaded: " + e.message));
+}
+(function(){
+  const host = document.getElementById("placemode");
+  const b = document.createElement("button"); b.textContent = "Places"; b.title = "City / CDP boundaries";
+  b.onclick = ()=> setPlacesVisible(!placesOn);
+  host.appendChild(b);
+})();
+function pct(x){ return (100*x).toFixed(x>=0.995||x===0 ? 0 : 1) + "%"; }
+function placePopup(r){
+  const sh = f => r.buildings ? r[f]/r.buildings : 0;
+  const line = (lab, f) => row(lab, `${fmt(r[f])} · ${pct(sh(f))}`);
+  return `<div class="pp-title">${esc(r.name)}</div>
+    <div class="pp-meta">${esc(PLACE_TYPE_LABEL[r.type]||r.type)} · ${esc((r.counties||[r.county]).filter(Boolean).join(", ") || "no county on record")}</div>
+    <div class="pp-grid">
+      ${row("Buildings", fmt(r.buildings))}
+      ${line("Wildfire elevated","wf_elev")}${line("Hail elevated","hail_elev")}
+      ${line("Flood elevated","flood_elev")}${line("Wind elevated","wind_elev")}
+      ${line("Access elevated","access_elev")}
+      ${line("Any peril elevated","any_elev")}${line("2+ perils elevated","multi_elev")}
+    </div>
+    <div class="pp-cav">${PLACE_FLOOR_NOTE} Each building is counted in one place only.</div>`;
+}
+// A tool-opened popup hangs BELOW the place point (anchor "top"): above it, the pan tally
+// and toolbar would cover the title.
+function showPlacePopup(id, lngLat){
+  const r = placeRowsById && placeRowsById.get(id); if(!r) return;
+  document.querySelectorAll(".maplibregl-popup").forEach(p=>p.remove());
+  new maplibregl.Popup(lngLat ? {maxWidth:"320px"} : {maxWidth:"320px", anchor:"top"})
+    .setLngLat(lngLat || [r.clon, r.clat]).setHTML(placePopup(r)).addTo(map);
+}
+Object.assign(mapTools, {
+  find_top_places: ({peril, by="count", n=10, county, type="any", min_buildings, move=true})=>{
+    if(!window.PLACES) return {error:"place data still loading, ask again in a moment"};
+    const res = CoRiskPlaces.rank(window.PLACES, {peril, by, n, county, type, min_buildings});
+    if(!res.ok) return {error:res.error};
+    if(move) highlightHexes(res.places.map(p=>({lon:p.lon, lat:p.lat})));
+    const {ok, ...out} = res;
+    return {...out, note:PLACE_FLOOR_NOTE, share_floor:CoRiskPlaces.SHARE_MIN_BUILDINGS};
+  },
+  focus_place: async ({name})=>{
+    if(!window.PLACES) return {error:"place data still loading, ask again in a moment"};
+    const hit = CoRiskPlaces.find(window.PLACES, name);
+    if(!hit.ok) return {error:hit.error, candidates:hit.candidates};
+    const r = hit.row, out = {...CoRiskPlaces.summary(r, null, undefined), note:PLACE_FLOOR_NOTE};
+    delete out.rank;
+    if(r.type==="remainder"){
+      if(r.county) mapTools.focus_county({county:r.county});
+      showPlacePopup(r.place_id);
+      return {...out, meaning: r.county
+        ? "buildings in this county outside every incorporated city and CDP"
+        : "buildings with no county on record in the source data, outside every city and CDP"};
+    }
+    try{
+      const geo = await loadPlaceGeo();
+      const f = geo.features.find(x=>x.properties.place_id===r.place_id);
+      const b = f && geomBounds(f.geometry);
+      if(b) map.fitBounds(b, {padding:70, maxZoom:13, duration:1000});
+      else map.flyTo({center:[r.clon, r.clat], zoom:11});
+    }catch(e){ map.flyTo({center:[r.clon, r.clat], zoom:11}); out.boundary = "boundary unavailable: " + e.message; }
+    if(map.getLayer("place-sel")) map.setFilter("place-sel", ["==",["get","place_id"], r.place_id]);
+    showPlacePopup(r.place_id);
+    return out;
+  }
+});
+Object.assign(TOOL_LABEL, {
+  find_top_places: i=>"Ranking places by "+(i.peril||"")+(i.county?" in "+i.county:" statewide"),
+  focus_place: i=>"Focusing "+i.name
+});
 // The copilot function lives on Vercel and holds ANTHROPIC_API_KEY server-side. When this page
 // is embedded on another origin (wherobots.com/solutions/...), a RELATIVE "/api/chat" resolves
 // to the embedding host, which has no such function -- so target the Vercel deployment
