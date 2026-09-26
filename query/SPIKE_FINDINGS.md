@@ -361,10 +361,22 @@ git history if the labs build is ever re-evaluated.
 
 ## What is still unverified
 
-- **Safari: still unverified, blocked on one setting only Ben can change.** Safari 26.5.2 is
-  installed, but `safaridriver` refuses a session: "You must enable 'Allow remote automation' in
-  the Developer section of Safari Settings to control Safari via WebDriver." Nothing was done to
-  work around it. Once it is on, the same query can be driven through `safaridriver`.
+- **Safari: now verified.** Safari 26.5.2 on macOS, driven through `safaridriver` (WebDriver)
+  against the LIVE app (`co-risk-app.vercel.app`, `main` at 6033f78, which includes the
+  concurrent-reads change) on 2026-09-25, fresh automation session, through
+  `window.mapTools.query_properties({place:"Boulder", radius_m:1000, limit:10})` against the
+  published `v20260924` extract on S3. Engine load (`loadQueryEngine()`, fresh session):
+  2,911 ms. Query: 1,922 ms, 10 rows, the same building ids in the same order as headless
+  Chrome 153 on the same build (ids hashed and compared). One run.
+
+  | browser (live app, 6033f78) | engine load | Boulder 1 km | rows |
+  | --- | --- | --- | --- |
+  | Safari 26.5.2 (`safaridriver`) | 2,911 ms | 1,922 ms | 10, ids match Chrome |
+  | Chrome 153 (headless, CDP) | ~1,100 ms | 2,110 ms | 10 |
+
+  No GET / concurrency / byte columns for Safari: `safaridriver` speaks WebDriver only and
+  exposes no network-event domain comparable to Chrome's CDP `Network`, so per-request counts
+  are not observable from this harness. Correctness (identical rows) and wall time are.
 - **Firefox: now verified.** Firefox 155.0.1, headless, driven over its own WebDriver BiDi
   endpoint (`--remote-debugging-port`, no geckodriver), fresh profile per run, through
   `window.mapTools.query_properties` against the published extract on S3. Every run returned the
