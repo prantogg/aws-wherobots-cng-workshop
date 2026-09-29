@@ -1,7 +1,7 @@
 # From Satellite to Signal
 ### Building a Geospatial Agentic AI Stack on AWS
 
-**Presented by Felt, Wherobots, and AWS**
+**Presented by Wherobots and AWS at the CNG Forum**
 90-minute hands-on workshop
 
 > An end-to-end workflow that takes raw satellite imagery and weather data through agentic data engineering, risk scoring, and into interactive map dashboards — all driven by natural language.
@@ -19,12 +19,12 @@
 **Part 1 — Agentic Data Engineering** (Wherobots MCP)
 - Explore satellite and weather data catalogs via the Wherobots MCP server
 - Walk through a medallion pipeline (Bronze → Silver → Gold) that scores buildings using zonal statistics, KNN spatial joins, and temporal aggregation
-- Verify 4 Gold tables in Aurora PostgreSQL with industry-specific risk tiers
+- Verify 4 Gold tables in your Wherobots catalog with industry-specific risk tiers
 
-**Part 2 — Map Builder AI Agent** (Strands + Bedrock + Felt MCP)
-- Run a Strands agent that reads skill docs, generates Python, and executes it
-- Create interactive Felt maps from natural language: *"Show buildings with high wildfire risk near Poway"*
-- Explore the same data through the Felt MCP for conversational map creation
+**Part 2 — Map Builder AI Agent** (Strands + Bedrock + Wherobots MCP + MapLibre)
+- Run a Strands agent that queries the Gold tables through the Wherobots MCP
+- Create interactive MapLibre maps from natural language: *"Show buildings with high wildfire risk near Poway"*
+- Watch a local map update after every answer; every map is plain GeoJSON plus a MapLibre style
 
 ## Architecture
 
@@ -35,21 +35,17 @@ Developer in Claude Code / Kiro         Strands Agent (Bedrock Claude)
         │                                       │
         ▼                                       ▼
 ┌─────────────────────┐               ┌───────────────────────┐
-│ Wherobots MCP       │               │ Skills + python_repl  │
-│ Spatial SQL on      │               │ + Felt MCP            │
-│ Apache Sedona       │               │ (felt.com/mcp)        │
-└────────┬────────────┘               └───────────┬───────────┘
-         │                                        │
-         ▼                                        ▼
-   Bronze → Silver → Gold               ┌──────────────────┐
-         │                               │ Felt Maps        │
-         │ JDBC                          │ Interactive,     │
-         ▼                               │ shareable,       │
-┌──────────────────┐                     │ live from Aurora  │
-│ Aurora PostgreSQL ├────────────────────▶│                  │
-│ workshop schema  │                     └──────────────────┘
-│ ~1M × 4 tables   │
-└──────────────────┘
+│ Wherobots MCP       │               │ Wherobots MCP         │
+│ Spatial SQL on      │   ┌───────────┤ + write_layer         │
+│ Apache Sedona       │   │  queries  │ + publish_map         │
+└────────┬────────────┘   │           └───────────┬───────────┘
+         │                │                       │ GeoJSON + map.json
+         ▼                ▼                       ▼
+ Bronze → Silver → Gold ─────────┐      ┌───────────────────────┐
+                                 │      │ MapLibre viewer       │
+          org_catalog.gold       │      │ localhost:8765        │
+          Iceberg, ~1M × 4  ◀────┘      │ updates after answers │
+                                        └───────────────────────┘
 ```
 
 > See [architecture.md](architecture.md) for the full architecture with data sources, layer details, and design decisions.
@@ -76,31 +72,23 @@ It walks you through everything in order — setup (clone, credentials, MCP conf
 ├── part1_data_engineering/
 │   ├── bronze-to-silver.ipynb         # Spatial joins, zonal stats, KNN (generated via MCP)
 │   ├── silver-to-gold.ipynb           # Industry scoring, risk tiers (generated via MCP)
-│   ├── aurora_schema.sql              # Aurora DDL reference
 │   ├── data_dictionary.md             # Full schema + business logic (silver + gold tables)
 │   ├── custom-pipelines/              # Participant-generated pipeline variations
 │   └── skills/wherobots-pipeline/     # Skill that guides MCP toward deterministic output
 │
 ├── part2_map_agent/
-│   ├── agent.py                       # Strands Agent (Bedrock Claude + skills + python_repl)
+│   ├── agent.py                       # Strands Agent (Bedrock Claude + Wherobots MCP + map tools)
 │   ├── run.sh                         # Agent launcher
 │   ├── requirements.txt               # Python dependencies
 │   ├── CLAUDE.md                      # Part 2 agent guide
+│   ├── viewer/index.html              # MapLibre viewer served on localhost:8765
 │   └── skills/
-│       ├── aurora-postgis/            # Skill: PostGIS query patterns
-│       └── felt-mapping/              # Skill: Felt map creation + FSL styling
-│
-├── deploy-aurora/
-│   ├── cloudformation.yaml            # Aurora + VPC + Bedrock IAM (provisioning)
-│   └── README.md                      # Deploy / tear-down instructions
+│       └── open-mapping/              # Skill: map spec, styling expressions, tier palette
 │
 ├── scripts/
 │   ├── bootstrap.py                   # Wherobots org_catalog ingest (Bronze)
 │   ├── run_bootstrap.py               # Local wrapper that submits bootstrap.py
-│   ├── upload_seed_to_s3.sh           # Refreshes the Aurora seed file in S3
-│   └── dump_gold_tables.py            # Authoring tool: snapshot gold tables → CSV + DDL
-│
-└── screenshots/                       # Workshop walkthrough screenshots
+│   └── kiro.sh                        # Opens Kiro with .env exported
 ```
 
 ---
@@ -109,11 +97,10 @@ It walks you through everything in order — setup (clone, credentials, MCP conf
 
 | Component | Technology | Role |
 |-----------|-----------|------|
-| **Data Processing** | Wherobots Cloud (Apache Sedona) + Wherobots MCP | Spatial SQL, medallion pipeline |
-| **Data Store** | Amazon Aurora PostgreSQL 17 + PostGIS | Gold layer serving, spatial queries |
-| **AI Orchestration** | Amazon Bedrock (Claude Opus 4.8) + Strands Agents SDK | Agent that generates and executes Python |
-| **Visualization** | Felt + Felt MCP (`felt.com/mcp`) | Interactive maps, styling, sharing |
-| **Infrastructure** | Amazon S3, AWS IAM, CloudFormation | Storage, auth, provisioning |
+| **Data Processing** | Wherobots Cloud (Apache Sedona) + Wherobots MCP | Spatial SQL, medallion pipeline, agent queries |
+| **Data Store** | Wherobots catalog (Apache Iceberg) | Gold tables for pipelines and the agent |
+| **AI Orchestration** | Amazon Bedrock (Claude Opus 4.8) + Strands Agents SDK | Agent that turns questions into queries and maps |
+| **Visualization** | MapLibre GL JS + OpenFreeMap | Interactive maps from GeoJSON and MapLibre styles |
 
 ---
 
@@ -121,10 +108,9 @@ It walks you through everything in order — setup (clone, credentials, MCP conf
 
 - [Workshop Guide](workshop-step-by-step.md) — Full 90-minute step-by-step
 - [Architecture](architecture.md) — Two-part diagram, data sources, design decisions
-- [Felt API](https://developers.felt.com/rest-api/api-reference) — REST API reference
-- [Felt MCP](https://felt.com/mcp) — MCP server for conversational map creation
-- [felt-python SDK](https://github.com/felt/felt-python) — Python wrapper
 - [Strands Agents SDK](https://github.com/strands-agents/sdk-python) — Agent framework
 - [Wherobots Cloud](https://www.wherobots.com/) — Managed Apache Sedona
 - [Wherobots MCP](https://docs.wherobots.com/develop/mcp/mcp-server-setup.md) — MCP server docs
 - [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/) — Foundation model hosting
+- [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/) — Map rendering
+- [MapLibre Style Spec](https://maplibre.org/maplibre-style-spec/) — Format of each map's `map.json`
