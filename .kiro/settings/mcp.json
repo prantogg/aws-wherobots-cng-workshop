@@ -18,13 +18,6 @@
         "get_query_results_tool",
         "cancel_query_tool"
       ]
-    },
-    "felt": {
-      "url": "https://felt.com/mcp",
-      "type": "http",
-      "headers": {
-        "Authorization": "Bearer ${FELT_API_TOKEN}"
-      }
     }
   }
 }

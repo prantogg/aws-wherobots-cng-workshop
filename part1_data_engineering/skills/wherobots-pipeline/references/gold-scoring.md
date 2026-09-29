@@ -124,7 +124,7 @@ percentile cuts.
 
 Every Gold row carries a `score_explanation` STRING column with the factor
 breakdown — component values, weights, AND the source column names that
-fed them. Downstream consumers (Felt tooltips, analyst queries) can then
+fed them. Downstream consumers (map popups, analyst queries) can then
 tell exactly which raw column drove each factor, not just its normalized
 value:
 

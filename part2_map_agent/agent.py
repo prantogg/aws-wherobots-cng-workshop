@@ -1,363 +1,245 @@
 #!/usr/bin/env python3
 """
-Map Builder Agent
-==================
+Open Map Agent
+==============
 
-A Strands agent that builds Felt maps from Aurora PostgreSQL data using the Felt MCP.
+A Strands agent that answers questions over the Gold catalog tables with the
+Wherobots MCP and publishes the answer as a MapLibre map.
 
-Architecture:
-  - Primary: Felt MCP tools (create_map, create_layer_from_data_source, generate_fsl, etc.)
-  - Fallback: python_repl (psycopg2 for Aurora, felt-python for uploads)
-  - Skills: aurora-postgis (fallback), felt-mapping (MCP tool docs)
+  - Wherobots MCP: explore tables and test SQL
+  - write_layer:   run the final SQL, save the result as GeoJSON under viewer/maps/<map_id>/
+  - publish_map:   write viewer/maps/<map_id>/map.json and return the viewer URL
+  - The viewer (viewer/index.html) is served locally on MAP_VIEWER_PORT.
 
 Usage:
-    python agent.py "Map wildfire locations colored by cause"
+    python agent.py "Map critical insurance buildings colored by wildfire factor"
     python agent.py  # interactive mode
 """
 
-import logging
+import functools
+import io
+import json
 import os
+import re
 import sys
+import threading
+import time
+import urllib.request
+import uuid
 from datetime import timedelta
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
-# Configure python_repl: auto-approve, non-interactive, keep state
-os.environ.setdefault("BYPASS_TOOL_CONSENT", "true")
-os.environ.setdefault("PYTHON_REPL_INTERACTIVE", "false")
-os.environ.setdefault("PYTHON_REPL_RESET_STATE", "false")
-
-from mcp.client.streamable_http import streamablehttp_client
-from strands import Agent, AgentSkills
+import geopandas as gpd
+import pyarrow.parquet as pq
+import shapely
+import httpx2
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+from strands import Agent, AgentSkills, tool
 from strands.tools.mcp import MCPClient
-from strands.tools.mcp.mcp_client import CLIENT_SESSION_NOT_RUNNING_ERROR_MESSAGE
 from strands.types.exceptions import MCPClientInitializationError
-from strands_tools import file_read, python_repl
-
-logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────
-SKILLS_DIR = Path(__file__).parent / "skills"
+VIEWER_DIR = Path(__file__).parent / "viewer"
+MAPS_DIR = VIEWER_DIR / "maps"
+VIEWER_PORT = int(os.environ.get("MAP_VIEWER_PORT", "8765"))
+WHEROBOTS_MCP_URL = os.environ.get("WHEROBOTS_MCP_URL", "https://api.cloud.wherobots.com/mcp")
+# Catalog database silver-to-gold writes the gold tables into (org_catalog.<GOLD_DB>.<table>).
+GOLD_DB = os.environ.get("GOLD_DB", "gold")
+# The Wherobots MCP returns at most this many rows per query.
+MAX_ROWS = 10000
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
-# Felt's MCP runs each tool call as an HTTP request. A heavy data-source query
-# (e.g. a spatial filter over ~1M buildings) makes the synchronous validation
-# step run long; the default 30s HTTP timeout aborts it. Bump it. The actual
-# layer processing is async and handled via poll_layer_processing_status, so
-# these only need to cover the request/response round-trip.
-FELT_MCP_TIMEOUT = float(os.environ.get("FELT_MCP_TIMEOUT", "120"))
-FELT_MCP_SSE_READ_TIMEOUT = float(os.environ.get("FELT_MCP_SSE_READ_TIMEOUT", "600"))
-# How many times to rebuild the session and retry a tool call after a drop.
-FELT_MCP_MAX_RETRIES = int(os.environ.get("FELT_MCP_MAX_RETRIES", "1"))
+skills_plugin = AgentSkills(skills=str(Path(__file__).parent / "skills" / "open-mapping"))
 
-# Name of the Felt data source connected to Aurora. Must match the source
-# created in Setup Step 6 (the Step 6 Option A command names it from this
-# same env var, so both sides stay in sync).
-FELT_SOURCE_NAME = os.environ.get("FELT_SOURCE_NAME", "").strip() or "workshop-db"
-
-# ── Skills Plugin ──────────────────────────────────────────────
-skills_plugin = AgentSkills(skills=str(SKILLS_DIR))
-
-
-# ── Felt MCP Client ────────────────────────────────────────────
-# Read-only / side-effect-free tools that are SAFE to auto-retry after a drop.
-# Everything else (create_*, update_*, delete_*, add_*, import_*, upload_*,
-# duplicate_*, refresh_*, share_*, upsert_*) is treated as non-idempotent: a
-# dropped connection during such a call often means it ALREADY succeeded
-# server-side (Felt registers the layer and processes async even when the
-# synchronous response times out), so retrying would create a duplicate.
-_IDEMPOTENT_TOOL_PREFIXES = (
-    "list_", "get_", "browse_", "inspect_", "poll_", "render_", "search_", "generate_",
-)
-_IDEMPOTENT_TOOL_NAMES = frozenset({"who_am_i"})
-
-
-class ResilientMCPClient(MCPClient):
-    """MCPClient that transparently rebuilds a dropped Felt session.
-
-    Strands runs the MCP connection on a background thread. When the
-    streamable-HTTP transport is closed mid-call (Felt-side timeout on a heavy
-    query, proxy idle cap, or a network blip), that thread dies and *every*
-    later tool call raises "the client session is not running" for the rest of
-    the process — there is no built-in reconnect. We detect the dead session
-    and rebuild it via stop()+start() (which reset state for reuse). The same
-    MCPAgentTool objects keep working because they reference this client, not
-    the underlying session.
-
-    Retry is idempotency-aware: read-only tools are retried after a reconnect;
-    mutating tools (e.g. create_layer_from_data_source) are NOT retried, because
-    a drop during them usually means the work already landed server-side and a
-    retry would duplicate it. For those we just reconnect so the next call (the
-    model polling / get_map_layers to find the layer) works.
-    """
-
-    @staticmethod
-    def _is_idempotent(name: str) -> bool:
-        short = name.split("__")[-1]  # strip any "server__" prefix
-        return short in _IDEMPOTENT_TOOL_NAMES or short.startswith(_IDEMPOTENT_TOOL_PREFIXES)
-
-    def _reconnect(self) -> bool:
-        # _reconnect only ever runs on an already-inactive session, so the
-        # background thread is dead or mid-teardown and there's nothing to join.
-        # Drop the reference unconditionally so stop() skips signaling a
-        # close-event onto that dead/dying loop — scheduling onto it leaks an
-        # un-awaited coroutine and emits a RuntimeWarning. (Checking is_alive()
-        # here is racy: just after a drop the thread is briefly still alive
-        # while it unwinds.) stop() still closes the loop and resets state.
-        self._background_thread = None
-        try:
-            self.stop(None, None, None)
-        except Exception:
-            logger.debug("error during stop() before reconnect", exc_info=True)
-        try:
-            self.start()
-            print("🔄 Felt MCP session reconnected")
-            return True
-        except Exception:
-            logger.exception("failed to reconnect Felt MCP session")
-            return False
-
-    async def call_tool_async(self, tool_use_id, name, arguments=None, read_timeout_seconds=None):
-        idempotent = self._is_idempotent(name)
-        for attempt in range(FELT_MCP_MAX_RETRIES + 1):
-            if not self._is_session_active() and not self._reconnect():
-                break
-            try:
-                result = await super().call_tool_async(
-                    tool_use_id, name, arguments, read_timeout_seconds
-                )
-            except MCPClientInitializationError:
-                continue  # session died at entry — loop to rebuild and retry
-            # Live session ⇒ the call went through. A dead session here means
-            # the connection dropped during the call.
-            if self._is_session_active():
-                return result
-            if not idempotent:
-                # The call may have already landed server-side; retrying would
-                # duplicate it. Reconnect for subsequent calls, then surface the
-                # result so the model can poll / get_map_layers to find it.
-                print(f"⚠️  Felt MCP dropped during '{name}' — reconnected; not retrying "
-                      f"(may have succeeded server-side; check via poll/get_map_layers)")
-                self._reconnect()
-                return result
-            if attempt == FELT_MCP_MAX_RETRIES:
-                return result
-            print(f"⚠️  Felt MCP dropped during '{name}' — reconnecting and retrying")
-        return self._handle_tool_execution_error(
-            tool_use_id, MCPClientInitializationError(CLIENT_SESSION_NOT_RUNNING_ERROR_MESSAGE)
-        )
-
-    def call_tool_sync(self, tool_use_id, name, arguments=None, read_timeout_seconds=None):
-        idempotent = self._is_idempotent(name)
-        for attempt in range(FELT_MCP_MAX_RETRIES + 1):
-            if not self._is_session_active() and not self._reconnect():
-                break
-            try:
-                result = super().call_tool_sync(
-                    tool_use_id, name, arguments, read_timeout_seconds
-                )
-            except MCPClientInitializationError:
-                continue
-            if self._is_session_active():
-                return result
-            if not idempotent:
-                print(f"⚠️  Felt MCP dropped during '{name}' — reconnected; not retrying "
-                      f"(may have succeeded server-side; check via poll/get_map_layers)")
-                self._reconnect()
-                return result
-            if attempt == FELT_MCP_MAX_RETRIES:
-                return result
-            print(f"⚠️  Felt MCP dropped during '{name}' — reconnecting and retrying")
-        return self._handle_tool_execution_error(
-            tool_use_id, MCPClientInitializationError(CLIENT_SESSION_NOT_RUNNING_ERROR_MESSAGE)
-        )
-
-
-felt_mcp_client = ResilientMCPClient(
-    lambda: streamablehttp_client(
-        url="https://felt.com/mcp",
-        headers={"Authorization": f"Bearer {os.environ.get('FELT_API_TOKEN', '')}"},
-        timeout=timedelta(seconds=FELT_MCP_TIMEOUT),
-        sse_read_timeout=timedelta(seconds=FELT_MCP_SSE_READ_TIMEOUT),
+wherobots_mcp = MCPClient(
+    lambda: streamable_http_client(
+        WHEROBOTS_MCP_URL,
+        http_client=create_mcp_http_client(
+            headers={"x-api-key": os.environ.get("WHEROBOTS_API_KEY", ""),
+                     # SQL session runtime (e.g. "micro"); unset uses the organization's default.
+                     **({"x-runtime-id": rid} if (rid := os.environ.get("WHEROBOTS_RUNTIME_ID")) else {})},
+            timeout=httpx2.Timeout(60, read=300),
+        ),
     )
 )
 
-# ── Seed python_repl state (fallback only) ─────────────────────
-_SEED_CODE = f"""
-import os, json, psycopg2
-from dotenv import load_dotenv
-from pathlib import Path
-load_dotenv(Path("{Path(__file__).parent.parent / '.env'}"), override=True)
 
-# Fallback: felt-python for uploads if MCP fails
-from felt_python import upload_file
+# ── Wherobots MCP helpers ──────────────────────────────────────
 
-# Fallback: Aurora direct access
-AURORA_DSN = os.environ.get("AURORA_DSN", "")
-FELT_TOKEN = os.environ.get("FELT_API_TOKEN", "")
+def _mcp(name: str, arguments: dict) -> dict:
+    """Call a Wherobots MCP tool and return its JSON payload."""
+    r = wherobots_mcp.call_tool_sync(
+        tool_use_id=f"map-{uuid.uuid4().hex[:8]}", name=name, arguments=arguments,
+        read_timeout_seconds=timedelta(seconds=90),
+    )
+    text = "".join(c.get("text", "") for c in r.get("content", []) if isinstance(c, dict))
+    if r.get("status") == "error":
+        raise RuntimeError(f"{name} failed: {text[:500]}")
+    payload = r.get("structuredContent") or json.loads(text)
+    return payload.get("result", payload) if "status" not in payload else payload
 
-print("✅ Fallback ready: psycopg2, felt-python")
-"""
+
+def _run_query_to_parquet(sql: str) -> bytes:
+    """Run SQL through the Wherobots MCP with store_results and download the Parquet result."""
+    job = _mcp("submit_query_tool", {"query": sql, "store_results": True, "limit": MAX_ROWS, "wait_seconds": 50})
+    while job.get("status") in ("pending", "starting_session", "running"):
+        time.sleep(10)
+        job = _mcp("get_query_status_tool", {"query_id": job["query_id"]})
+    if job.get("status") != "succeeded":
+        raise RuntimeError(f"query {job.get('status')}: {job.get('error_message')}")
+    if not job.get("result_uri"):
+        job = _mcp("get_query_results_tool", {"query_id": job["query_id"]})
+    with urllib.request.urlopen(job["result_uri"], timeout=120) as resp:
+        return resp.read()
+
+
+def _summarize(gdf: gpd.GeoDataFrame) -> dict:
+    """Column stats the agent uses to pick colour stops and legend labels."""
+    columns = {}
+    for col in gdf.columns.drop("geometry"):
+        s = gdf[col]
+        if s.dtype.kind in "iuf":
+            q = s.quantile([0, 0.1, 0.5, 0.9, 1]).round(4).tolist()
+            columns[col] = {"type": "number", "min": q[0], "p10": q[1], "p50": q[2], "p90": q[3], "max": q[4]}
+        elif s.dtype.kind in "OSUb":
+            counts = s.astype(str).value_counts()
+            columns[col] = {"type": "string", "distinct": int(counts.size)}
+            if counts.size <= 20:
+                columns[col]["values"] = counts.to_dict()
+    minx, miny, maxx, maxy = (round(v, 5) for v in gdf.total_bounds)
+    return {
+        "rows": len(gdf),
+        "truncated": len(gdf) >= MAX_ROWS,
+        "geometry_types": gdf.geom_type.value_counts().to_dict(),
+        "bounds": [minx, miny, maxx, maxy],
+        "center": [round((minx + maxx) / 2, 5), round((miny + maxy) / 2, 5)],
+        "columns": columns,
+    }
+
+
+# ── Map tools ──────────────────────────────────────────────────
+
+@tool
+def write_layer(map_id: str, layer_id: str, sql: str) -> str:
+    """Run a Wherobots SQL query and save the result as a GeoJSON layer for a map.
+
+    The SELECT must include the `geometry` column plus only the columns the map
+    styles or shows in popups. Results are capped at 10,000 rows; aggregate (e.g.
+    H3 cells) for anything larger.
+
+    Args:
+        map_id: Map folder name, lowercase letters, digits, '-' or '_' (e.g. "critical-wildfire").
+        layer_id: Layer file name within the map, same rules (e.g. "buildings").
+        sql: Final Wherobots Spatial SQL query.
+
+    Returns:
+        JSON summary: row count, truncation flag, bounds, center, and per-column
+        stats (numeric min/p10/p50/p90/max, string top values). Use it to choose
+        colour stops, legend labels and the map center.
+    """
+    if not (_ID_RE.match(map_id) and _ID_RE.match(layer_id)):
+        return "map_id and layer_id must be lowercase letters, digits, '-' or '_'."
+    table = pq.read_table(io.BytesIO(_run_query_to_parquet(sql))).to_pandas()
+    if "geometry" not in table.columns:
+        return "The query result has no `geometry` column; include it in the SELECT."
+    # geometry_bbox is a bounding-box column Wherobots adds to query results; maps don't need it.
+    gdf = gpd.GeoDataFrame(table.drop(columns=["geometry", "geometry_bbox"], errors="ignore"),
+                           geometry=shapely.from_wkb(table["geometry"]), crs=4326)
+    for col in gdf.columns.drop("geometry"):
+        if gdf[col].dtype.kind in "mM" or gdf[col].map(lambda v: isinstance(v, (bytes, dict, list))).any():
+            gdf[col] = gdf[col].astype(str)
+    out = MAPS_DIR / map_id / f"{layer_id}.geojson"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    gdf.to_file(out, driver="GeoJSON")
+    return json.dumps({"file": f"{layer_id}.geojson", **_summarize(gdf)})
+
+
+@tool
+def publish_map(map_id: str, spec: dict) -> str:
+    """Publish a map spec for the viewer and return the map URL.
+
+    Args:
+        map_id: Same map_id used with write_layer.
+        spec: Map spec (see the open-mapping skill): title, description, center
+            [lng, lat], zoom, basemap ("dark" or "light"), sources (MapLibre
+            sources; GeoJSON `data` is the layer file name, e.g. "buildings.geojson"),
+            layers (MapLibre layers), legend [{label, color}], popup [column names].
+
+    Returns:
+        The viewer URL, or a validation error to fix and retry.
+    """
+    if not _ID_RE.match(map_id):
+        return "map_id must be lowercase letters, digits, '-' or '_'."
+    map_dir = MAPS_DIR / map_id
+    sources = spec.get("sources") or {}
+    for sid, src in sources.items():
+        data = src.get("data")
+        if isinstance(data, str) and "://" not in data and not (map_dir / data).exists():
+            return f"Source '{sid}' points at '{data}', which does not exist; call write_layer first."
+    for layer in spec.get("layers") or []:
+        if layer.get("source") not in sources:
+            return f"Layer '{layer.get('id')}' uses unknown source '{layer.get('source')}'."
+    if not spec.get("layers"):
+        return "The spec needs at least one layer."
+    map_dir.mkdir(parents=True, exist_ok=True)
+    (map_dir / "map.json").write_text(json.dumps(spec, indent=1))
+    # The live viewer (no ?map=) polls this pointer and swaps in the newest map.
+    (MAPS_DIR / "current.json").write_text(
+        json.dumps({"id": map_id, "map": f"maps/{map_id}/map.json", "updated": time.time()}))
+    return (f"Published. The live viewer at http://localhost:{VIEWER_PORT} now shows it. "
+            f"Permalink: http://localhost:{VIEWER_PORT}/?map=maps/{map_id}/map.json")
+
 
 # ── System Prompt ──────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a geospatial map builder agent. You create interactive Felt maps from PostgreSQL/PostGIS data using the Felt MCP tools.
+SYSTEM_PROMPT = f"""You are a geospatial map builder agent. You answer questions about San Diego
+building risk with Wherobots Spatial SQL and publish each answer as an interactive map.
 
-## Available Data (workshop schema — 1,035,306 San Diego buildings each)
+## Data (gold tables in the Wherobots catalog)
 
-### workshop.insurance_exposure
-Columns: asset_id, geometry, building_class, wildfire_factor, flood_factor, severe_weather_factor, risk_score, risk_tier, exposure_delta, triage_priority, relative_risk_band, score_explanation, weather_window_start, weather_window_end
+Query a table with: SELECT ... FROM org_catalog.{GOLD_DB}.<table>
 
-### workshop.cre_risk
-Columns: asset_id, geometry, building_class, wildfire_factor, flood_factor, severe_weather_factor, risk_score, risk_tier, acquisition_screen_flag (boolean), exposure_magnitude_index, hazard_proximity_m, score_explanation
+- insurance_exposure: asset_id, geometry, building_class, wildfire_factor, flood_factor,
+  severe_weather_factor, risk_score, risk_tier, exposure_delta, triage_priority, relative_risk_band
+- cre_risk: asset_id, geometry, building_class, wildfire_factor, flood_factor, severe_weather_factor,
+  risk_score, risk_tier, acquisition_screen_flag, exposure_magnitude_index, hazard_proximity_m
+- capital_markets_signals: asset_id, geometry, building_class, wildfire_factor, flood_factor,
+  severe_weather_factor, risk_score, disruption_signal, supply_chain_vulnerability, event_density_signal
+  (NO risk_tier column)
+- energy_asset_risk: asset_id, geometry, building_class, wildfire_factor, flood_factor,
+  severe_weather_factor, risk_score, risk_tier, outage_probability, wildfire_ignition_risk,
+  weather_impact_frequency
 
-### workshop.capital_markets_signals
-Columns: asset_id, geometry, building_class, wildfire_factor, flood_factor, severe_weather_factor, risk_score, disruption_signal, supply_chain_vulnerability, event_density_signal, score_explanation, weather_window_start, weather_window_end
+Risk tiers: critical, high, elevated, moderate, low. All geometry is WGS84 (lng/lat).
+If unsure of a column, run SELECT * EXCEPT (geometry) ... LIMIT 1 first.
 
-### workshop.energy_asset_risk
-Columns: asset_id, geometry, building_class, wildfire_factor, flood_factor, severe_weather_factor, risk_score, risk_tier, outage_probability, wildfire_ignition_risk, weather_impact_frequency, score_explanation
+## Workflow
 
-Risk tiers: low, moderate, elevated, high, critical
-Region: San Diego County, CA (center: 32.7157, -117.1611)
-Note: `capital_markets_signals` has no `risk_tier` column — use `risk_score` thresholds instead.
+1. When the filter is clear, go straight to write_layer: it waits for the query itself and
+   reports the row count and truncation. Only use the Wherobots MCP tools first when you need
+   to discover columns or values; then call submit_query_tool with wait_seconds=55 and, if it
+   is still running, call get_query_status_tool at most a few times rather than in a tight loop.
+2. Call write_layer with the final SQL. Select geometry + only the columns you style or show.
+   If the answer would exceed 10,000 rows, aggregate first (e.g. H3 cells with
+   ST_H3CellIDs/ST_H3ToGeom, or centroids) or narrow the filter, and say so.
+3. Read the summary write_layer returns and build the map spec from the REAL value ranges:
+   colour stops from min/p50/max (never a fixed 0-1 if the data spans 0-0.4), categories from
+   the top values, center from the summary.
+4. Call publish_map. The user's live viewer updates on its own, so don't lead with a link:
+   say the map is updated and what it shows in one or two sentences, and give the permalink
+   only at the end for sharing.
 
-## Primary Workflow (Felt MCP Tools)
+For follow-ups ("make it light", "only above 0.3"), reuse the same map_id. Only call
+write_layer again when the data changes; a styling change only needs publish_map.
+Load the open-mapping skill for the spec format and the tier palette.
 
-Use these MCP tools in sequence:
-
-1. **list_data_sources** — Find the Aurora data source (look for "__FELT_SOURCE_NAME__" or similar PostgreSQL source)
-2. **create_map** — Create a new map with title, center lat/lon, zoom level
-3. **create_layer_from_data_source** — Add a layer via SQL query against Aurora
-4. **poll_layer_processing_status** — Wait for layer to finish processing (use wait_seconds=30)
-5. **generate_fsl** — Generate styling (pass layer_id, geometry_type, description of desired style)
-6. **update_layer_properties** — Apply the generated FSL style to the layer
-7. **render_map** — Show the map inline (call this LAST after all edits)
-
-### A `create_layer_from_data_source` timeout is usually NOT a failure
-
-For a large layer, the synchronous response to `create_layer_from_data_source`
-can exceed the connection timeout and surface as a timeout or "connection
-closed" error — but Felt has almost always **already registered the layer** and
-is processing it asynchronously. So when a create errors out:
-
-- **Do NOT call `create_layer_from_data_source` again** — a retry creates a
-  DUPLICATE layer.
-- Instead call **`get_map_layers`** to find the layer that was registered, then
-  **`poll_layer_processing_status`** on it until `completed`.
-- Only recreate if `get_map_layers` shows the layer genuinely did not register.
-- If you ever do find a duplicate, delete the extra one with `delete_layer`.
-
-## Example Tool Sequence
-
-User: "Show elevated risk buildings colored by tier"
-
-1. Call `list_data_sources` → find data_source_id for PostgreSQL source
-2. Call `create_map`:
-   - title: "Elevated Risk Buildings"
-   - latitude: 32.7157
-   - longitude: -117.1611
-   - zoom: 10
-   - basemap: "dark"  (risk maps read best on dark — colors and heat pop)
-3. Call `create_layer_from_data_source`:
-   - data_source_id: <from step 1>
-   - sql_query: "SELECT asset_id, building_class, risk_score, risk_tier, geometry FROM workshop.insurance_exposure WHERE risk_tier = 'elevated'"
-   - name: "Elevated Risk"
-4. Call `poll_layer_processing_status`:
-   - wait_seconds: 30
-5. Call `generate_fsl`:
-   - layer_id: <from step 3>
-   - geometry_type: "polygon"
-   - description: "Categorical coloring by risk_tier. Orange for elevated, red for high, dark red for critical."
-6. Call `update_layer_properties`:
-   - layer_id: <from step 3>
-   - style: <FSL from step 5>
-7. Call `render_map` — shows inline preview
-8. Return the map URL to the user
-
-## Adding Buffer/Reference Layers
-
-To add a buffer circle (e.g., "10 miles from downtown"):
-
-Use `create_layer_from_data_source` with PostGIS ST_Buffer:
-```sql
-SELECT
-    'Downtown 10-mile buffer' as name,
-    ST_Buffer(
-        ST_SetSRID(ST_MakePoint(-117.1611, 32.7157), 4326)::geography,
-        16093.44
-    )::geometry as geometry
-```
-
-Then style with transparent fill + colored stroke via `generate_fsl`.
-
-## Zoom-Aware & Heatmap Styling
-
-Felt styles can react to zoom. Any numeric paint property accepts a ramp
-`{"linear": [[zoom, value], ...]}` (plus `minZoom`/`maxZoom`) — there is no
-separate visibility API, so use an `opacity` ramp to fade layers in/out by zoom.
-
-Flagship pattern — **risk-density heatmap that resolves into features**: an H3
-hexbin layer (`type: "h3"`, `aggregation: "mean"` of a metric like `risk_score`,
-`binMode: "high"` for fine hotspots) on a **dark** basemap, fading OUT as you
-zoom in (`opacity {"linear": [[10,0.9],[13,0]]}`), cross-faded with the actual
-features fading IN (`{"linear": [[11,0],[13,0.85]]}`). H3 bins by point, so query
-`ST_Centroid(geometry)` for the hexbin layer; keep polygons for the detail layer.
-See the `felt-mapping` skill ("Pattern: Risk-density heatmap…") for the full recipe.
-
-## SQL Requirements
-
-- ALWAYS use `workshop.` schema prefix (e.g., `workshop.insurance_exposure`)
-- ALWAYS include a geometry column in SELECT
-- Use LIMIT for large result sets (max 100,000 rows)
-- Common spatial functions: ST_DWithin, ST_Intersects, ST_Buffer, ST_MakePoint
-
-### NEVER `SELECT *` — select only the columns the layer needs
-
-`create_layer_from_data_source` makes Felt pull and process the entire result
-synchronously before the layer is registered. A wide `SELECT *` over many rows
-ships a huge payload and can drop the connection mid-call.
-
-- **List explicit columns**: `geometry` + the fields you actually style or show
-  in popups (e.g. `asset_id, building_class, risk_score, risk_tier, geometry`).
-- **Never pull large free-text columns into a layer** unless explicitly asked —
-  especially `score_explanation` (it is bigger than the geometry itself and the
-  map never renders it). The same goes for any other long narrative/text column.
-- Selecting fewer columns roughly halves the payload Felt must process and does
-  NOT change which features appear on the map — only `LIMIT` changes that, so
-  keep all matching rows unless the user asks to cap them.
-
-Example — county-wide risk buildings, trimmed to what the map uses:
-```sql
-SELECT asset_id, building_class, risk_score, risk_tier, geometry
-FROM workshop.insurance_exposure
-WHERE risk_tier IN ('elevated', 'high', 'critical')
-```
-
-## Fallback (python_repl)
-
-Use python_repl ONLY when:
-- MCP upload fails
-- Complex data transforms that can't be done in SQL
-- Aurora connectivity debugging
-
-```python
-import psycopg2
-conn = psycopg2.connect(AURORA_DSN)
-cur = conn.cursor()
-cur.execute("SELECT count(*) FROM workshop.insurance_exposure")
-print(cur.fetchone())
-conn.close()
-```
-
-## Critical Rules
-
-- ALWAYS call `list_data_sources` first to get the data source ID
-- ALWAYS call `poll_layer_processing_status` after adding a layer
-- ALWAYS call `render_map` as the LAST step (it captures a snapshot)
-- ALWAYS include the map URL in your response
-- Use `generate_fsl` for styling — don't hand-write FSL
-- One map per request unless explicitly asked for multiple
-""".replace("__FELT_SOURCE_NAME__", FELT_SOURCE_NAME)
+Users are underwriters, CRE and energy analysts, not GIS engineers: describe what the map
+shows in their terms (buildings, risk tiers, neighbourhoods), not SQL, file formats or
+function names.
+"""
 
 
 # ── Agent Factory ──────────────────────────────────────────────
@@ -366,106 +248,81 @@ def get_model():
     """Get the best available Bedrock model."""
     from strands.models.bedrock import BedrockModel
     return BedrockModel(
-        model_id=os.environ.get(
-            "BEDROCK_MODEL_ID",
-            "us.anthropic.claude-opus-4-8",
-        ),
-        region_name=(
-            os.environ.get("AWS_REGION")
-            or os.environ.get("AWS_DEFAULT_REGION")
-            or "us-west-2"
-        ),
+        model_id=os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-8"),
+        region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2",
     )
 
 
-def create_agent(felt_tools: list) -> Agent:
-    """Create the map builder agent with Felt MCP tools."""
-    agent = Agent(
+def create_agent(wherobots_tools: list) -> Agent:
+    return Agent(
         model=get_model(),
         system_prompt=SYSTEM_PROMPT,
-        tools=[python_repl, file_read] + felt_tools,
+        tools=[write_layer, publish_map] + wherobots_tools,
         plugins=[skills_plugin],
     )
 
-    # Seed python_repl with fallback imports
-    agent.tool.python_repl(code=_SEED_CODE)
 
-    return agent
+def start_viewer() -> None:
+    """Serve viewer/ (index.html + maps/) on localhost in a background thread."""
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def end_headers(self):
+            # Maps are rewritten in place on every publish; never serve a stale copy.
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
+
+    handler = functools.partial(QuietHandler, directory=str(VIEWER_DIR))
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", VIEWER_PORT), handler)
+    except OSError:
+        print(f"⚠️  Port {VIEWER_PORT} is busy; set MAP_VIEWER_PORT to a free port.")
+        sys.exit(1)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
 # ── CLI ────────────────────────────────────────────────────────
 
 def _preflight():
-    """Fail fast with a clear message if required credentials are missing."""
-    token = os.environ.get("FELT_API_TOKEN", "").strip()
-    if not token or token == "your-felt-api-token":
-        print("❌ FELT_API_TOKEN is not set in your .env.")
-        print("   The Map Builder Agent needs a Felt API token to reach the Felt MCP.")
-        print("   Get one at Felt → Settings → Integrations (it starts with 'felt_pat_'),")
-        print("   set FELT_API_TOKEN=... in the repo-root .env, then re-run ./run.sh.")
+    if not os.environ.get("WHEROBOTS_API_KEY", "").strip():
+        print("❌ WHEROBOTS_API_KEY is not set in your .env.")
         sys.exit(1)
-    dsn = os.environ.get("AURORA_DSN", "").strip()
-    if not dsn or "your-aurora-host" in dsn:
-        print("⚠️  AURORA_DSN looks unset — Felt will connect, but Aurora queries may fail.")
-        print("   Set AURORA_DSN in .env (the AuroraDSN from your CloudFormation outputs).\n")
-
-
-def _check_felt_source():
-    """Warn early if the Aurora data source is missing from Felt (Setup Step 6).
-
-    Every Part 2 prompt starts with list_data_sources; if the FELT_SOURCE_NAME
-    source was never created, the agent stalls on its very first tool call
-    with no hint of why. Non-fatal: skills/instructor setups may differ.
-    """
+    import boto3
     try:
-        result = felt_mcp_client.call_tool_sync(
-            tool_use_id="preflight-list-data-sources",
-            name="list_data_sources",
-            arguments={},
-        )
-        text = str(result.get("content", "")).lower()
-    except Exception:
-        return  # non-fatal — the agent surfaces tool errors itself
-    if FELT_SOURCE_NAME.lower() not in text and "postgres" not in text:
-        print(f"⚠️  No '{FELT_SOURCE_NAME}' (or other Postgres) data source found in Felt —")
-        print("    the agent's first step (list_data_sources) will come back empty and")
-        print(f"    map prompts will fail. Create the '{FELT_SOURCE_NAME}' source first:")
-        print("    Setup Step 6 in workshop-step-by-step.md (one curl command via the")
-        print("    Felt API — it names the source from this same FELT_SOURCE_NAME).\n")
+        boto3.client("sts").get_caller_identity()
+    except Exception as e:
+        print(f"❌ AWS credentials for Bedrock are not working: {e}")
+        print("   Refresh them (e.g. `aws sso login --profile <profile>`), then re-run.")
+        sys.exit(1)
 
 
 def main():
     _preflight()
-    print("🗺️  Map Builder Agent (Felt MCP)")
+    start_viewer()
+    print("🗺️  Open Map Agent (Wherobots MCP + MapLibre)")
     print("=" * 50)
-    print("Build Felt maps from Aurora PostgreSQL data.")
+    print(f"Open http://localhost:{VIEWER_PORT} and keep it open: it updates after every answer.")
     print("Type 'quit' to exit.\n")
     print("Examples:")
-    print('  "Map the high and critical risk buildings, colored by risk tier"')
-    print('  "Map wildfire factor as a heat gradient"')
-    print('  "Compare insurance vs CRE risk tiers"')
+    print('  "Map critical insurance buildings colored by wildfire factor"')
+    print('  "Show energy assets with outage probability above 0.5"')
     print()
-
-    # Connect to Felt MCP and stay connected for the session
     try:
-        with felt_mcp_client:
-            print("🔌 Connecting to Felt MCP...")
-            felt_tools = felt_mcp_client.list_tools_sync()
-            print(f"✅ Felt MCP connected ({len(felt_tools)} tools available)")
-            print()
+        with wherobots_mcp:
+            wherobots_tools = wherobots_mcp.list_tools_sync()
+            print(f"✅ Wherobots MCP connected ({len(wherobots_tools)} tools available)")
+            # Start the SQL session now so its cold start overlaps with the user typing.
+            _mcp("submit_query_tool", {"query": "SELECT 1", "wait_seconds": 1})
+            print("⏳ Compute is warming up; the first answer may still take a minute or two.\n")
+            agent = create_agent(wherobots_tools)
 
-            _check_felt_source()
-
-            agent = create_agent(felt_tools)
-
-            # Single prompt from CLI args
             if len(sys.argv) > 1:
                 prompt = " ".join(sys.argv[1:])
                 print(f"🔍 {prompt}\n")
                 agent(prompt)
                 print()
 
-            # Interactive loop (stays inside MCP context)
             while True:
                 try:
                     prompt = input("🔍 > ").strip()
@@ -481,10 +338,8 @@ def main():
                 agent(prompt)
                 print()
     except MCPClientInitializationError:
-        print("\n❌ Could not connect to the Felt MCP server (https://felt.com/mcp).")
-        print("   The usual cause is an invalid or expired FELT_API_TOKEN.")
-        print("   Check FELT_API_TOKEN in your .env (Felt → Settings → Integrations,")
-        print("   it starts with 'felt_pat_'), then re-run ./run.sh.")
+        print(f"\n❌ Could not connect to the Wherobots MCP ({WHEROBOTS_MCP_URL}).")
+        print("   Check WHEROBOTS_API_KEY in your .env, then re-run.")
         sys.exit(1)
 
 
