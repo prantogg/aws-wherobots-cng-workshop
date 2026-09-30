@@ -225,7 +225,7 @@ The Silver layer enriches each building with hazard data through three spatial o
 |-------|-----------|--------|
 | Overture Buildings + USFS Burn Probability raster | Extract mean/max burn probability for each building footprint | `asset_wildfire_exposure` — wildfire_factor per building |
 
-> **Key insight:** A building near Poway might sit directly on high burn probability land, while its neighbor 200m away is shielded by a ridge. This is why nearby buildings get different scores.
+> **Key insight:** A building on a canyon edge in Tierrasanta or Scripps Ranch might sit directly on high burn probability land, while its neighbor 200m away is shielded by a ridge. This is why nearby buildings get different scores.
 
 **Flood exposure** — Weekly zonal statistics (per ISO week):
 | Input | Operation | Output |
@@ -311,7 +311,7 @@ You should see:
 - **Spatial operations** (zonal stats, KNN joins) run server-side on Apache Sedona — even billions of rows
 - **Gold stays in Iceberg** in your Wherobots catalog — the same tables feed later pipelines and the Part 2 agent, with no export step
 - The same data pipeline supports **4 different industry verticals** with different scoring weights from identical source data
-- The risk story is **localized**: every building around Ramona scores high or critical, none downtown does, and wildfire is the factor that decides it
+- The risk story is **localized**: it concentrates on the canyon edges and is nearly absent downtown, and wildfire is the factor that separates critical from high
 
 ---
 
