@@ -33,7 +33,7 @@ The system has two parts — one for data engineering, one for end-user explorat
 ║  │ RAW (S3) │──▶│ SILVER   │──▶│ GOLD (Apache Iceberg)    │            ║
 ║  │ NOAA     │   │ Zonal    │   │ org_catalog.gold.*       │            ║
 ║  │ OPERA    │   │ Stats    │   │ Scoring, weighting,      │            ║
-║  │ USFS     │   │ KNN Join │   │ tiers — ~1M x 4 tables   │            ║
+║  │ USFS     │   │ KNN Join │   │ tiers — 357K x 4 tables  │            ║
 ║  │ Overture │   │          │   │                          │            ║
 ║  └──────────┘   └──────────┘   └────────────┬─────────────┘            ║
 ╚═════════════════════════════════════════════╪═══════════════════════════╝
@@ -170,7 +170,7 @@ Answers too large to draw building by building are aggregated in SQL first (for 
 |---|---|---|
 | Two-layer architecture | Wherobots MCP (data eng) + Strands map agent (maps) | Clean separation: data engineer builds pipeline, analyst explores maps |
 | Geographic scope | San Diego, CA | Wildfire + flood + severe weather overlap; compact for workshop |
-| Asset type | Buildings (Overture) | Available via Wherobots Open Data; ~1M in San Diego |
+| Asset type | Buildings (Overture) | Available via Wherobots Open Data; ~357K in the City of San Diego (~1.03M in the county) |
 | Iceberg as handoff | `org_catalog.gold` | The pipeline writes and the agent reads the same tables; no export or second database |
 | Map rendering | MapLibre GL JS on the participant's laptop | Open source, no account or key; maps are standard GeoJSON + MapLibre style files |
 | Gold persistence | Iceberg (GeoParquet optional) | One copy for reprocessing, analysis and the map agent |

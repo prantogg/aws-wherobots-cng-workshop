@@ -32,7 +32,7 @@ The same building gets **different risk scores** depending on who's asking:
 - A **real estate investor** weights severe weather highest (0.35) — they care about long-term value
 - An **energy company** weights wildfire at 0.40 — they care about grid infrastructure near vegetation
 
-This is what you'll explore: ~1M buildings, 4 industry perspectives, one map.
+This is what you'll explore: 357,263 buildings, 4 industry perspectives, one map.
 
 ---
 
@@ -347,7 +347,7 @@ User: "Show me buildings with high wildfire risk near Poway"
         ┌───────────────────────────┐
         │  Wherobots Cloud          │
         │  org_catalog.gold.*       │
-        │  (Iceberg, ~1M × 4)       │
+        │  (Iceberg, 357K × 4)      │
         └─────────────┬─────────────┘
                       │ query result
                       ▼
