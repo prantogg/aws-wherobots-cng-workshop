@@ -1,115 +1,56 @@
-# Colorado P&C Risk — Exposure Explorer
+# San Diego building risk — map + copilot
 
-MapLibre GL JS + PMTiles map over the Colorado P&C risk tiles. Three zoom-staged
-layers: **H3 hex (z0–13) → parcels (z10+) → buildings (z14+)**, with a peril toggle
-(wildfire / hail / flood / wind / access), click-to-popup, and the caveat footnotes.
+An interactive map of the workshop's Gold tables for all of San Diego County (1,026,302 buildings,
+four industry lenses), with a chat copilot that drives the map and answers building-level
+questions by running spatial SQL **in your browser** with SedonaDB (WebAssembly).
 
-The tiles are **hosted and live** on a public-read S3 bucket, and the app is already
-pointed at them — no local tile files needed.
+Adapted from Ben Pruden's Colorado property risk explorer (its history is kept in this folder).
 
-## Run it
-
-⚠️ **Serve on port 8080 or 8090.** The tile bucket's CORS policy allows GET/HEAD from
-`http://localhost:8080`, `http://localhost:8090`, and `https://*.vercel.app` **only**.
-Any other port (Vite's 5173, Next's 3000, etc.) fails with an opaque CORS error that
-*looks* like broken tiles when the bucket is fine.
+## Run it locally (workshop)
 
 ```bash
-cd co-risk-app
-python3 -m http.server 8080     # or: npx http-server . -p 8080 -c-1
+source .venv/bin/activate               # the venv from Setup, Lab 01
+python part2_map_app/serve.py
 ```
 
-Open **http://localhost:8080/** . That's it.
+Open http://localhost:8765. The copilot runs on Amazon Bedrock with your workshop AWS
+credentials (`BEDROCK_MODEL_ID` in `.env`); the credentials never leave your laptop. The map
+data is read straight from a public bucket, so nothing else needs setting up.
 
-## Tiles (live, public-read, range + CORS verified)
+Try: *"Which places have the most critical buildings for insurance?"*, *"Show me the wildfire
+hotspots around Ramona"*, *"Top 10 buildings by wildfire within 3 miles of Julian"*. The first
+building-level question downloads the ~10 MB query engine, so it takes a few seconds longer.
 
-```
-https://co-pc-risk-tiles-benp-uw2.s3.us-west-2.amazonaws.com/tiles/co_hex.pmtiles
-https://co-pc-risk-tiles-benp-uw2.s3.us-west-2.amazonaws.com/tiles/co_parcels.pmtiles
-https://co-pc-risk-tiles-benp-uw2.s3.us-west-2.amazonaws.com/tiles/co_buildings.pmtiles
-```
+## How it works
 
-Set in `TILES_BASE` at the top of the `<script>` in `index.html`. PMTiles reads only the
-byte ranges each view needs, so panning Colorado at low zoom pulls a few MB of the hex
-archive, not the whole 2.3 GB buildings file.
+| Piece | What it is |
+|---|---|
+| `index.html` | MapLibre GL JS map, OpenFreeMap basemap, and the copilot loop. Tool calls run in the browser |
+| PMTiles | `sd_hex` (H3 res-7 averages), `sd_buildings` (footprints, z14+), `sd_places` (city boundaries) |
+| `query/` | The SedonaDB WASM engine seam: picks the GeoParquet files a query touches (H3 res-5 cells), builds SQL from typed arguments, runs it in the browser |
+| `copilot.json` | The copilot's system prompt and tools, shared by both chat backends |
+| `serve.py` | Local server: static files plus `/api/chat` on Bedrock |
+| `api/chat.js` | The same `/api/chat` for Vercel, on the Anthropic API |
+| `data/` | `publish.py` copies an export from Wherobots to the public bucket; `build_app_data.py` regenerates `copilot.json`, the gazetteer and the data version |
 
-## Correctness rules baked into the styling (see the two handoffs)
+The model never writes SQL: `query_properties` takes a place, a radius, a metric and a limit,
+and `query/sqlbuild.js` builds the statement from a fixed template.
 
-- Score domains are **0–2** (wf/hail) and **0–1** (flood/wind/access), styled with
-  explicit `match` — never `interpolate` over an assumed range.
-- **Nothing is styled or ranked by dollars.** `parval`/`improv_val` are popup-only
-  reference (~63% coverage, county-dependent; El Paso reports $0).
-- Access is styled by **`access_score`**, so the 103,807 NULL-distance ("furthest,"
-  no station within 25 km) buildings are never greyed out; popups render NULL distance
-  as "furthest," not "missing."
-- Language is risk **indicators**, not insurability determinations.
+## Customise it with Kiro
 
-- **Optional tile fields, feature-detected:** `land_use` (parcels + buildings) and
-  `fema_flood_zone` (parcels) light up the land-use chips/tally split/popup rows and
-  the flood-peril "FEMA zones" sub-mode — but only after the tiles are regenerated
-  (see `pipelines/co-risk/README.md`); with today's tiles those controls stay hidden.
+Ask Kiro to change the app, for example: *"add a wildfire threshold slider that filters the
+buildings layer"*, *"add a dark basemap toggle"*, *"add a copilot tool that compares two
+places"*. Reload the page to see each change.
 
-The H3 layer shades **building density** (its primary styling field); the peril scores
-render on parcels and buildings as you zoom in. Counts (hex 24,868 / parcels 2,720,180 /
-buildings 2,771,126) are taken from the handoffs; nothing is recomputed.
-
-## Places (cities, CDPs, county remainders)
-
-`places.json` is the per-place rollup (545 places, every building counted once), fetched once
-and ranked in the browser by `places.js`; the copilot's `find_top_places` / `focus_place`
-return only the top rows. The **Places** toggle draws the boundaries from
-`co_places_geo.json`, read from the tile bucket (`TILES_BASE`) with a same-origin fallback for
-local runs. Build notes and the measured overlaps: `pipelines/co-risk/README.md`, "Places".
-Real-browser check: `node pipelines/co-risk/tests/browser_check_places.mjs`.
-
-## Deploy
-
-Deploy the single `index.html` to Vercel (its `*.vercel.app` origin is already in the
-bucket's CORS allow-list) — no other hosting needed.
-
-## "Ask the data": spatial SQL in the browser
-
-[`ASK_THE_DATA_PLAN.md`](ASK_THE_DATA_PLAN.md) is the reviewed plan; **the gate passed** and the
-feature is wired into the copilot. Ask it *"what are the top 10 properties at risk within 10
-miles of downtown Denver?"* and it geocodes the place, runs real spatial SQL over the full
-scored-building extract **in your browser**, draws the answer on the map and lists it in a panel.
-No query backend, no credentials, no warm cloud session.
-
-The engine is [CereusDB](https://github.com/tobilg/cereusdb) (Apache SedonaDB compiled to WASM,
-Apache-2.0), pinned to an exact version and loaded from a CDN **lazily, on the first data
-question**. Everything else on this map works whether or not it ever loads.
-
-| file | what it is |
-| --- | --- |
-| [`query/SPIKE_FINDINGS.md`](query/SPIKE_FINDINGS.md) | the gate result, the engine's sharp edges, and what is still unverified |
-| `query/validate.js` | the one allowlist-and-clamp validator, shared by the agent tool and `?q=` links |
-| `query/h3cover.js` | H3 resolution selector and the conservative covering set |
-| `query/registry.js` | which county part files a query touches, and version pinning |
-| `query/sqlbuild.js` | the SQL template and the `co_risk_query` identifier substitution |
-| `query/gazetteer.js` | Colorado-only place lookup; unknown places are rejected, never approximated |
-| `query/engine.js` | the CereusDB seam: lazy load, per-file registration, engine-death recovery |
-| `query/executor.js` | validate to rows, including the exact geodesic radius |
-| `query/probe_prereqs.mjs` | live check that the published extract is usable |
-
-Three things in here are not obvious and will bite anyone who changes them:
-
-- **The object store is registered at the ORIGIN, never at a path prefix.** A prefix makes the
-  fetch miss, and the miss enters a retry path that calls `Instant::now()`, which panics on wasm
-  and kills the engine instance outright.
-- **The geometry column needs `ST_SetSRID(ST_GeomFromWKB(...), 5070)`.** The engine does not read
-  GeoParquet metadata, so the column arrives as plain binary, and it compares CRS before geometry.
-- **EPSG:5070 is equal-area, so a planar radius is wrong by about 0.8%.** The SQL predicate is
-  deliberately inflated past that and the exact radius is applied geodesically in the executor,
-  so a "within 10 miles" answer never silently drops a building that is inside it.
+## Take-home: deploy to Vercel
 
 ```bash
-cd apps/co-risk-app && python3 -m http.server 8080   # the app
-pipelines/co-risk/tests/run_all.sh                   # the suites behind it
+npm i -g vercel
+cd part2_map_app
+vercel deploy
+vercel env add ANTHROPIC_API_KEY        # your own key; set a spend limit on it
+vercel deploy --prod
 ```
 
-h3-js is pinned (version, URL and sha256 in `query/h3cover.js`, checked by the validator suite).
-The browser loads it from the CDN with a subresource-integrity hash, like MapLibre and pmtiles;
-`pipelines/co-risk/tests/fetch_h3.sh` caches that same file for the Node guards, and `run_all.sh`
-skips those suites loudly when there is no network rather than failing for the wrong reason.
-
-Serve on **8080 or 8090**: the bucket's CORS does not cover Vite's 5173.
+The deployed copilot uses `api/chat.js` with your Anthropic key (`ANTHROPIC_MODEL` overrides
+the model). Optionally set `APP_SECRET` to require an `x-app-secret` header.
