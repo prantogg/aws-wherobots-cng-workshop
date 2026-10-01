@@ -1,0 +1,148 @@
+// Colorado P&C Risk Copilot — Anthropic Messages API proxy (holds the key server-side).
+// The agent's brain (system prompt + data + guardrails + tool schema) lives here; the browser
+// executes the returned tool_use calls against the MapLibre map and posts back tool_results.
+const SYSTEM = "You are the Colorado P&C Risk Copilot, embedded in an interactive property-exposure map for an insurance / risk audience. You explain the data AND you drive the map for the user via tools.\n\nSTATEWIDE: 2,771,126 buildings, 2,720,180 parcels, 24,868 H3 cells across 64 counties.\n\nPER-COUNTY DATA (authoritative; use ONLY these numbers, never invent others). Fields: county, buildings (total), wf/hail/flood/wind/access = buildings with an ELEVATED score for that peril, avg = mean composite score (0-7), cov = %% of buildings with a published assessor value:\n[{\"county\":\"El Paso\",\"buildings\":290630,\"wf\":65001,\"hail\":131267,\"flood\":2151,\"wind\":86243,\"access\":23636,\"avg\":2.42,\"cov\":0.0},{\"county\":\"Arapahoe\",\"buildings\":280818,\"wf\":195,\"hail\":68396,\"flood\":1258,\"wind\":37681,\"access\":5927,\"avg\":1.43,\"cov\":96.6},{\"county\":\"Denver\",\"buildings\":266279,\"wf\":5,\"hail\":85006,\"flood\":1652,\"wind\":66179,\"access\":5,\"avg\":1.54,\"cov\":98.9},{\"county\":\"Jefferson\",\"buildings\":211565,\"wf\":35100,\"hail\":75227,\"flood\":2471,\"wind\":33719,\"access\":9587,\"avg\":1.91,\"cov\":98.2},{\"county\":\"Adams\",\"buildings\":201527,\"wf\":22,\"hail\":52189,\"flood\":1404,\"wind\":38422,\"access\":9441,\"avg\":1.54,\"cov\":97.5},{\"county\":\"Larimer\",\"buildings\":195757,\"wf\":35318,\"hail\":47584,\"flood\":2703,\"wind\":23014,\"access\":46521,\"avg\":1.93,\"cov\":0.0},{\"county\":\"Weld\",\"buildings\":152757,\"wf\":2553,\"hail\":80712,\"flood\":3194,\"wind\":96425,\"access\":37020,\"avg\":2.59,\"cov\":96.9},{\"county\":\"Douglas\",\"buildings\":145722,\"wf\":36713,\"hail\":60710,\"flood\":436,\"wind\":37719,\"access\":16336,\"avg\":2.52,\"cov\":0.0},{\"county\":\"Boulder\",\"buildings\":144013,\"wf\":31064,\"hail\":46578,\"flood\":5076,\"wind\":35430,\"access\":6481,\"avg\":2.15,\"cov\":96.7},{\"county\":\"Mesa\",\"buildings\":106184,\"wf\":2420,\"hail\":7147,\"flood\":1741,\"wind\":0,\"access\":21619,\"avg\":0.64,\"cov\":95.9},{\"county\":\"Pueblo\",\"buildings\":90902,\"wf\":2735,\"hail\":32469,\"flood\":846,\"wind\":0,\"access\":11908,\"avg\":1.49,\"cov\":48.8},{\"county\":\"La Plata\",\"buildings\":38505,\"wf\":14270,\"hail\":0,\"flood\":842,\"wind\":0,\"access\":26928,\"avg\":2.08,\"cov\":93.2},{\"county\":\"Fremont\",\"buildings\":30932,\"wf\":6048,\"hail\":4218,\"flood\":2384,\"wind\":0,\"access\":8773,\"avg\":1.9,\"cov\":93.6},{\"county\":\"Montrose\",\"buildings\":30831,\"wf\":419,\"hail\":6,\"flood\":799,\"wind\":0,\"access\":13200,\"avg\":0.82,\"cov\":97.6},{\"county\":\"Garfield\",\"buildings\":30717,\"wf\":1658,\"hail\":2,\"flood\":78,\"wind\":0,\"access\":13020,\"avg\":1.12,\"cov\":0.0},{\"county\":\"Delta\",\"buildings\":27440,\"wf\":1301,\"hail\":288,\"flood\":435,\"wind\":0,\"access\":13165,\"avg\":0.97,\"cov\":95.8},{\"county\":\"Eagle\",\"buildings\":26606,\"wf\":235,\"hail\":0,\"flood\":415,\"wind\":0,\"access\":12524,\"avg\":0.8,\"cov\":94.4},{\"county\":\"Montezuma\",\"buildings\":26086,\"wf\":5074,\"hail\":201,\"flood\":695,\"wind\":0,\"access\":9926,\"avg\":1.44,\"cov\":0.0},{\"county\":\"Broomfield\",\"buildings\":24602,\"wf\":99,\"hail\":8483,\"flood\":66,\"wind\":11975,\"access\":0,\"avg\":1.8,\"cov\":95.4},{\"county\":\"Elbert\",\"buildings\":23058,\"wf\":7531,\"hail\":11423,\"flood\":172,\"wind\":17733,\"access\":12675,\"avg\":4.14,\"cov\":98.1},{\"county\":\"Chaffee\",\"buildings\":22752,\"wf\":380,\"hail\":44,\"flood\":558,\"wind\":0,\"access\":13624,\"avg\":1.22,\"cov\":0.0},{\"county\":\"Park\",\"buildings\":21589,\"wf\":11030,\"hail\":1708,\"flood\":279,\"wind\":0,\"access\":19193,\"avg\":2.86,\"cov\":0.0},{\"county\":\"Morgan\",\"buildings\":20164,\"wf\":6,\"hail\":14310,\"flood\":2354,\"wind\":20164,\"access\":6205,\"avg\":3.35,\"cov\":0.0},{\"county\":\"Grand\",\"buildings\":19527,\"wf\":113,\"hail\":26,\"flood\":177,\"wind\":15695,\"access\":15698,\"avg\":2.27,\"cov\":91.0},{\"county\":\"Logan\",\"buildings\":19346,\"wf\":30,\"hail\":8392,\"flood\":4952,\"wind\":19346,\"access\":8702,\"avg\":3.31,\"cov\":87.9},{\"county\":\"Routt\",\"buildings\":19319,\"wf\":431,\"hail\":0,\"flood\":753,\"wind\":0,\"access\":11260,\"avg\":1.32,\"cov\":89.3},{\"county\":\"Summit\",\"buildings\":19221,\"wf\":159,\"hail\":0,\"flood\":218,\"wind\":0,\"access\":2461,\"avg\":0.25,\"cov\":92.4},{\"county\":\"Teller\",\"buildings\":18590,\"wf\":17102,\"hail\":1896,\"flood\":183,\"wind\":0,\"access\":7739,\"avg\":3.38,\"cov\":0.0},{\"county\":\"Gunnison\",\"buildings\":15823,\"wf\":320,\"hail\":4,\"flood\":945,\"wind\":0,\"access\":7413,\"avg\":0.82,\"cov\":92.0},{\"county\":\"Otero\",\"buildings\":14720,\"wf\":2,\"hail\":3824,\"flood\":0,\"wind\":9950,\"access\":2662,\"avg\":2.19,\"cov\":0.0},{\"county\":\"Las Animas\",\"buildings\":13936,\"wf\":4559,\"hail\":2819,\"flood\":340,\"wind\":0,\"access\":6900,\"avg\":2.5,\"cov\":82.9},{\"county\":\"Yuma\",\"buildings\":13305,\"wf\":6,\"hail\":9346,\"flood\":0,\"wind\":13305,\"access\":11820,\"avg\":3.86,\"cov\":0.0},{\"county\":\"Archuleta\",\"buildings\":13000,\"wf\":6245,\"hail\":0,\"flood\":328,\"wind\":0,\"access\":7410,\"avg\":2.01,\"cov\":90.3},{\"county\":\"Rio Grande\",\"buildings\":11525,\"wf\":32,\"hail\":0,\"flood\":901,\"wind\":0,\"access\":7773,\"avg\":1.08,\"cov\":0.0},{\"county\":\"Moffat\",\"buildings\":11513,\"wf\":692,\"hail\":12,\"flood\":0,\"wind\":0,\"access\":4950,\"avg\":1.07,\"cov\":0.0},{\"county\":\"Pitkin\",\"buildings\":10956,\"wf\":227,\"hail\":0,\"flood\":406,\"wind\":0,\"access\":7140,\"avg\":1.21,\"cov\":90.6},{\"county\":\"Alamosa\",\"buildings\":10283,\"wf\":24,\"hail\":0,\"flood\":0,\"wind\":0,\"access\":2708,\"avg\":0.34,\"cov\":0.0},{\"county\":\"Prowers\",\"buildings\":10037,\"wf\":422,\"hail\":4608,\"flood\":398,\"wind\":10037,\"access\":4188,\"avg\":3.24,\"cov\":0.0},{\"county\":\"Huerfano\",\"buildings\":8973,\"wf\":860,\"hail\":2034,\"flood\":0,\"wind\":0,\"access\":5888,\"avg\":2.18,\"cov\":76.5},{\"county\":\"Kit Carson\",\"buildings\":8684,\"wf\":2,\"hail\":5108,\"flood\":0,\"wind\":8684,\"access\":5382,\"avg\":3.3,\"cov\":0.0},{\"county\":\"Washington\",\"buildings\":8585,\"wf\":10,\"hail\":5012,\"flood\":47,\"wind\":8585,\"access\":7739,\"avg\":3.81,\"cov\":84.5},{\"county\":\"Custer\",\"buildings\":8235,\"wf\":2149,\"hail\":952,\"flood\":0,\"wind\":0,\"access\":7812,\"avg\":2.83,\"cov\":0.0},{\"county\":\"Conejos\",\"buildings\":7836,\"wf\":29,\"hail\":0,\"flood\":0,\"wind\":0,\"access\":7836,\"avg\":1.25,\"cov\":0.0},{\"county\":\"Saguache\",\"buildings\":7651,\"wf\":143,\"hail\":0,\"flood\":36,\"wind\":0,\"access\":7651,\"avg\":1.46,\"cov\":0.0},{\"county\":\"Clear Creek\",\"buildings\":7567,\"wf\":6205,\"hail\":83,\"flood\":439,\"wind\":7567,\"access\":1991,\"avg\":3.67,\"cov\":90.5},{\"county\":\"Rio Blanco\",\"buildings\":7260,\"wf\":1890,\"hail\":22,\"flood\":493,\"wind\":0,\"access\":5563,\"avg\":1.95,\"cov\":0.0},{\"county\":\"San Miguel\",\"buildings\":6476,\"wf\":287,\"hail\":0,\"flood\":0,\"wind\":0,\"access\":3852,\"avg\":1.56,\"cov\":87.5},{\"county\":\"Lincoln\",\"buildings\":6237,\"wf\":6,\"hail\":4171,\"flood\":85,\"wind\":6237,\"access\":5344,\"avg\":3.93,\"cov\":86.8},{\"county\":\"Lake\",\"buildings\":6072,\"wf\":41,\"hail\":12,\"flood\":0,\"wind\":0,\"access\":1807,\"avg\":0.44,\"cov\":86.4},{\"county\":\"Gilpin\",\"buildings\":5986,\"wf\":4143,\"hail\":0,\"flood\":90,\"wind\":5986,\"access\":645,\"avg\":3.51,\"cov\":78.4},{\"county\":\"Phillips\",\"buildings\":5851,\"wf\":0,\"hail\":4458,\"flood\":0,\"wind\":5851,\"access\":5820,\"avg\":3.8,\"cov\":95.1},{\"county\":\"Ouray\",\"buildings\":5298,\"wf\":181,\"hail\":0,\"flood\":64,\"wind\":0,\"access\":2003,\"avg\":1.21,\"cov\":0.3},{\"county\":\"Bent\",\"buildings\":4733,\"wf\":158,\"hail\":1357,\"flood\":0,\"wind\":4105,\"access\":4140,\"avg\":3.42,\"cov\":0.0},{\"county\":\"Baca\",\"buildings\":4684,\"wf\":1131,\"hail\":884,\"flood\":0,\"wind\":4684,\"access\":4684,\"avg\":3.79,\"cov\":0.0},{\"county\":\"Sedgwick\",\"buildings\":4292,\"wf\":0,\"hail\":2580,\"flood\":130,\"wind\":4292,\"access\":3768,\"avg\":3.52,\"cov\":64.7},{\"county\":\"Costilla\",\"buildings\":3948,\"wf\":183,\"hail\":0,\"flood\":0,\"wind\":0,\"access\":3948,\"avg\":1.68,\"cov\":70.1},{\"county\":\"Cheyenne\",\"buildings\":3568,\"wf\":1,\"hail\":2716,\"flood\":0,\"wind\":3568,\"access\":2360,\"avg\":3.76,\"cov\":79.1},{\"county\":\"Crowley\",\"buildings\":3476,\"wf\":0,\"hail\":1460,\"flood\":0,\"wind\":3476,\"access\":1254,\"avg\":3.2,\"cov\":80.0},{\"county\":\"Dolores\",\"buildings\":3434,\"wf\":493,\"hail\":1,\"flood\":0,\"wind\":0,\"access\":1875,\"avg\":1.52,\"cov\":70.9},{\"county\":\"Jackson\",\"buildings\":3417,\"wf\":7,\"hail\":0,\"flood\":0,\"wind\":0,\"access\":3417,\"avg\":1.35,\"cov\":78.8},{\"county\":\"Kiowa\",\"buildings\":2681,\"wf\":52,\"hail\":1137,\"flood\":0,\"wind\":2681,\"access\":2681,\"avg\":3.94,\"cov\":0.0},{\"county\":\"Hinsdale\",\"buildings\":2368,\"wf\":139,\"hail\":0,\"flood\":158,\"wind\":0,\"access\":1131,\"avg\":0.89,\"cov\":0.0},{\"county\":\"Mineral\",\"buildings\":2310,\"wf\":19,\"hail\":0,\"flood\":34,\"wind\":0,\"access\":1300,\"avg\":0.91,\"cov\":88.2},{\"county\":\"San Juan\",\"buildings\":954,\"wf\":9,\"hail\":0,\"flood\":10,\"wind\":0,\"access\":954,\"avg\":1.45,\"cov\":88.4}]\n\nPERIL DEFINITIONS (elevated): wildfire = wf_score 2 (scale 0-2); hail = hail_score 2 (0-2); flood = flood_score 1 (0-1); wind = wind_score 1 (0-1); access = access_score 1 (0-1) = beyond ~5 road miles / no fire station within 25 km, and it INCLUDES the NULL-distance 'furthest' cohort.\n\nHARD RULES (never break):\n- These are risk INDICATORS, not determinations of insurability. Never call anything 'uninsurable' or make a coverage decision.\n- Compare and rank by BUILDING COUNT and the peril scores. NEVER rank or compare by dollars: assessor value coverage is ~63%% and county-dependent (El Paso, the largest exposure, publishes $0). Only mention dollars as an unreliable, popup-only reference if asked.\n- NULL road/station distance means FURTHEST (most remote), not missing.\n- yearbuilt is CONSTRUCTION year, not roof age; hail is radar-detected density, not modeled severity; wind/tornado are tract-resolution.\n- You have COUNTY-LEVEL data above AND sub-county HEX-LEVEL data via the find_hexes tool (24,868 H3 res-7 cells, ~5 km each). You do NOT have individual building or parcel figures; for that, tell the user to click that feature on the map. Never invent a number you didn't get from the county table or a find_hexes result.\n\nHEX DRILL-DOWN: when the user wants sub-county detail (the worst neighborhoods/areas/cells, hotspots, 'where exactly in <county>', 'show me the top N cells'), call find_hexes. It ranks the H3 cells by the chosen peril's elevated building count (or composite avg_score for 'all'), highlights them on the map, and returns each cell's centroid, building count, elevated count, and share. Rank and describe hexes by building count and share, never by dollars. A cell's 'share' is elevated buildings / total buildings in that cell. Use clear_hex_highlight to remove the markers.\n\nUSING TOOLS: when the user wants to see, go to, or focus on something, USE the tools (don't just describe it). Good patterns: set the peril then focus_county to explain one place with its counts; or set the peril then find_hexes to surface the worst cells within a county or statewide. Prefer focus_county (it selects and flies) for a single county. Call get_map_state if you need the current view.\n\nSTYLE: concise, plainspoken, decision-oriented for sellers/underwriters. Lead with the number. No preamble, no hedging boilerplate.";
+const TOOLS = [{"name": "set_peril", "description": "Color the whole map by a single peril, or 'all' for the general overview.", "input_schema": {"type": "object", "properties": {"peril": {"type": "string", "enum": ["all", "wildfire", "hail", "flood", "wind", "access"]}}, "required": ["peril"]}}, {"name": "set_all_mode", "description": "In the 'all' overview only: choose 'exposure' (building count) or 'risk' (composite score 0-7).", "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["exposure", "risk"]}}, "required": ["mode"]}}, {"name": "fly_to_county", "description": "Zoom the map to a Colorado county by name.", "input_schema": {"type": "object", "properties": {"county": {"type": "string"}}, "required": ["county"]}}, {"name": "focus_county", "description": "Select a county, focus the side panel on it, and fly there.", "input_schema": {"type": "object", "properties": {"county": {"type": "string"}}, "required": ["county"]}}, {"name": "clear_focus", "description": "Clear the selected county focus.", "input_schema": {"type": "object", "properties": {}}}, {"name": "fit_colorado", "description": "Zoom back out to the whole state.", "input_schema": {"type": "object", "properties": {}}}, {"name": "get_map_state", "description": "Return the current peril, sub-mode, zoom, and selected county.", "input_schema": {"type": "object", "properties": {}}}, {"name": "find_hexes", "description": "Find and highlight the highest-risk H3 hex cells (~5 km each) for a peril, optionally within one county. Ranks by that peril's elevated building count (or composite avg_score for 'all'), draws markers on the map, fits the view to them, and returns each cell's centroid, building count, elevated count, and share. Use for sub-county drill-down / hotspots / 'worst areas in <county>'.", "input_schema": {"type": "object", "properties": {"peril": {"type": "string", "enum": ["all", "wildfire", "hail", "flood", "wind", "access"], "description": "Which peril to rank by; 'all' ranks by composite avg_score."}, "county": {"type": "string", "description": "Optional Colorado county to restrict to. Omit for statewide."}, "n": {"type": "integer", "description": "How many cells to return (1-25, default 10)."}}, "required": ["peril"]}}, {"name": "clear_hex_highlight", "description": "Remove the hex-cell highlight markers from the map.", "input_schema": {"type": "object", "properties": {}}}];
+const MODEL = "claude-sonnet-5";
+
+// --- Best-effort per-IP + global rate limiting (in-memory, per warm instance) ---
+// NOTE: serverless instances are ephemeral and can run in parallel, so this is a speed bump,
+// not a hard guarantee. The real backstop against cost abuse is a monthly SPEND CAP on the
+// Anthropic key (console.anthropic.com -> Limits). For durable limiting use Vercel Firewall
+// rate rules or an Upstash/Vercel-KV store shared across instances.
+const RL_WINDOW_MS = 60000;   // 1 minute window
+const RL_PER_IP = 15;         // max requests per IP per window
+const RL_GLOBAL = 400;        // max requests across this instance per window (circuit breaker)
+const MAX_MESSAGES = 40;      // reject absurdly long conversations
+const MAX_PAYLOAD_CHARS = 100000; // reject oversized payloads (cost-abuse guard)
+const ipHits = new Map();     // ip -> [timestamps]
+let globalHits = [];          // [timestamps]
+function clientIp(req){
+  const xf = req.headers["x-forwarded-for"];
+  const first = (Array.isArray(xf) ? xf[0] : (xf || "")).split(",")[0].trim();
+  return first || (req.socket && req.socket.remoteAddress) || "unknown";
+}
+function rateCheck(ip){
+  const now = Date.now();
+  globalHits = globalHits.filter(t => now - t < RL_WINDOW_MS);
+  if(globalHits.length >= RL_GLOBAL) return { limited:true, scope:"global" };
+  let arr = (ipHits.get(ip) || []).filter(t => now - t < RL_WINDOW_MS);
+  if(arr.length >= RL_PER_IP){ ipHits.set(ip, arr); return { limited:true, scope:"ip" }; }
+  arr.push(now); ipHits.set(ip, arr); globalHits.push(now);
+  if(ipHits.size > 5000){ for(const [k,v] of ipHits){ const f = v.filter(t => now - t < RL_WINDOW_MS); if(f.length) ipHits.set(k,f); else ipHits.delete(k); } }
+  return { limited:false };
+}
+
+// Origins allowed to call this function cross-origin: the marketing site embed. The response
+// echoes the request Origin rather than sending "*", because this endpoint fronts an API key --
+// "*" would let any page on the internet spend it. Vary: Origin keeps caches from serving one
+// origin's ACAO to another.
+const EMBED_ORIGINS = new Set(["https://wherobots.com", "https://www.wherobots.com"]);
+
+// ---- "Ask the data": building-level questions -------------------------------------------
+// Declared separately and appended, rather than edited into SYSTEM and TOOLS above. Those are
+// each a single ~13 KB line, so touching them rewrites the whole line into every diff; keeping
+// this additive also makes the new capability readable as one block instead of buried mid-line.
+//
+// The SCHEMAS live here because the model turn needs them. The EXECUTION lives in the browser
+// (apps/co-risk-app/query/), because that is the only side that can run the WASM engine. This
+// function never builds SQL and never touches the extract.
+const ASK_THE_DATA_GUIDANCE = "\n\nASKING THE DATA (building-level questions): the county table and find_hexes are AGGREGATES. For a question about individual buildings near a place -- 'top 10 properties at risk within 10 miles of downtown Denver', 'worst buildings near Boulder' -- call query_properties with `place` set to the place name. It geocodes in the browser, so do NOT call geocode first: that costs the user a whole extra model round trip. That runs real spatial SQL over the full building dataset in the browser and draws the answer on the map. Report ONLY the rows it returns. Each row is a SCREENING score sampled at the building centroid, several perils are INHERITED from coarser resolution, and access_score is a 0/1 cohort flag rather than a measurement -- say so rather than calling them 'the riskiest properties'. If the tool returns notices (a clamped radius, a retired data version), tell the user. Never call query_properties for a whole county or the state; that is what the county table is for.";
+
+const QUERY_TOOLS = [
+  { name: "geocode",
+    description: "Resolve a Colorado place name (city, landmark, or 'downtown X') to a lon/lat. Colorado only -- this map has no data outside the state. Only needed when you want a place's coordinates WITHOUT querying buildings; query_properties takes `place` directly.",
+    input_schema: { type: "object", properties: {
+      place: { type: "string", description: "A Colorado place, e.g. 'downtown Denver', 'Boulder', 'Colorado Springs'." }
+    }, required: ["place"] } },
+  { name: "query_properties",
+    description: "Run a real spatial SQL query over the full scored-building dataset in the browser and return the top N buildings within a radius of a point, ranked by one peril score or the composite. Use this for 'top N at risk within X miles of PLACE' -- the county table and find_hexes CANNOT answer that, because it needs a global rank over individual buildings. Results are drawn on the map and listed in a panel automatically. Pass the place name as `place`; lon/lat are only for a centre that is not a named place.",
+    input_schema: { type: "object", properties: {
+      place: { type: "string", description: "A Colorado place name for the centre, e.g. 'downtown Denver'. Preferred: it is geocoded in the browser. Omit only when passing lon/lat." },
+      lon: { type: "number", description: "Longitude of the centre. Only when there is no place name." },
+      lat: { type: "number", description: "Latitude of the centre. Only when there is no place name." },
+      radius_m: { type: "number", description: "Search radius in METRES (10 miles = 16093.4). Values above 80000 are clamped." },
+      metric: { type: "string", enum: ["composite", "wf_score", "hail_score", "flood_score", "wind_score", "access_score"],
+                description: "What to rank by. 'composite' is the 0-7 screening sum." },
+      limit: { type: "integer", description: "How many buildings to return (1-50)." },
+      place_label: { type: "string", description: "Human label for the centre, e.g. 'downtown Denver', used in the results panel." }
+    }, required: ["radius_m"] } }
+];
+
+// ---- Places: city / CDP / county-remainder rollup ----------------------------------------
+// Same additive pattern as "Ask the data" above. The rollup itself (545 places) never goes to
+// the model: the browser ranks it and returns only the top-N rows a tool call asks for.
+const PLACE_GUIDANCE = [
+  "",
+  "",
+  "PLACES (cities and towns): for questions about cities, towns or communities -- 'which cities have the most wildfire risk', 'top towns for hail', 'which cities have the most risks and what are they', 'how exposed is Evergreen' -- use find_top_places and focus_place. The place table covers every scored building exactly once: incorporated cities and towns (type 'city'), Census Designated Places, i.e. named unincorporated communities such as Highlands Ranch, Evergreen or Black Forest (type 'cdp'), and one 'Unincorporated <County> County' remainder per county (type 'remainder') for buildings outside every city and CDP. Place numbers from these tools are authoritative; quote them, never invent others.",
+  "RANKING: rank by the COUNT of buildings elevated for the peril and show the share alongside (by:'count', the default). Rank by share only when the user asks for share or percentage; share ranking skips places under the tool's minimum-building floor so a tiny hamlet at 100% does not outrank a city -- say so when you use it. Never rank by dollars.",
+  "PERIL 'any': a building elevated for at least one of the five perils, counted once. Use it for 'most risks' / 'riskiest cities' across perils, then name WHAT the risks are from elevated_by_peril (for example: mostly hail and wind, little wildfire). elevated_two_plus_perils counts buildings elevated for two or more perils.",
+  "WORDING: say 'city or town' for type city, 'unincorporated community (CDP)' for cdp, and name remainders as 'unincorporated <County> County'. When a remainder ranks high, say plainly that it is the unincorporated part of the county, not a city. Every place count is a FLOOR (the building spine is not a complete census): say so once per answer. Say 'elevated', never 'insurable' or 'uninsurable'.",
+  "COUNTY FILTER: with county set, a place that spans several counties is matched on any overlap, but its counts are for the WHOLE place, never just that county's slice. Such rows carry count_scope (and spans_counties, the counties as measured): say so in the answer whenever one appears, and take county lists only from those fields.",
+  "MAP: find_top_places marks the returned places on the map; focus_place frames one place, outlines it and opens its popup. The Places boundary layer is a toggle the user controls."
+].join("\n");
+
+const PLACE_TOOLS = [
+  { name: "find_top_places",
+    description: "Rank Colorado places (incorporated cities/towns, CDPs, and per-county unincorporated remainders) by the number of buildings elevated for one peril, or 'any' peril. Returns the top N with buildings, elevated count, share, and every peril's elevated count and share, and marks them on the map.",
+    input_schema: { type: "object", properties: {
+      peril: { type: "string", enum: ["wildfire", "hail", "flood", "wind", "access", "any"],
+               description: "Peril to rank by. 'any' = buildings elevated for at least one peril, counted once." },
+      by: { type: "string", enum: ["count", "share"], description: "Default 'count'. Use 'share' only when the user asks for share/percentage." },
+      n: { type: "integer", description: "How many places to return (1-25, default 10)." },
+      county: { type: "string", description: "Optional: only places in this county (a place spanning counties matches each one)." },
+      type: { type: "string", enum: ["city", "cdp", "any"], description: "'city' = incorporated only, 'cdp' = Census Designated Places only, 'any' (default) = cities, CDPs and unincorporated county remainders." },
+      min_buildings: { type: "integer", description: "Share ranking only: override the minimum buildings a place needs to be ranked. Omit to use the default floor." }
+    }, required: ["peril"] } },
+  { name: "focus_place",
+    description: "Fly to one Colorado place by name (city, town, CDP, or 'Unincorporated <County> County'), outline it and open its popup. Returns its buildings and every peril's elevated count and share.",
+    input_schema: { type: "object", properties: {
+      name: { type: "string", description: "Place name, e.g. 'Evergreen', 'Colorado Springs', 'Unincorporated Jefferson County'." }
+    }, required: ["name"] } }
+];
+
+const ALL_TOOLS = TOOLS.concat(QUERY_TOOLS, PLACE_TOOLS);
+const FULL_SYSTEM = SYSTEM + ASK_THE_DATA_GUIDANCE + PLACE_GUIDANCE;
+
+export default async function handler(req, res){
+  // CORS must come before the POST check: a preflight is OPTIONS, and answering it with 405
+  // fails the whole cross-origin call. Same-origin requests on Vercel send no Origin and are
+  // untouched by any of this.
+  const origin = req.headers.origin;
+  const embedAllowed = typeof origin === "string" && EMBED_ORIGINS.has(origin);
+  if(embedAllowed){
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "content-type");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+  if(req.method === "OPTIONS"){ res.status(embedAllowed ? 204 : 403).end(); return; }
+  if(req.method !== "POST"){ res.status(405).json({error:"POST only"}); return; }
+  const key = process.env.ANTHROPIC_API_KEY;
+  if(!key){ res.status(500).json({error:"ANTHROPIC_API_KEY is not set on this deployment."}); return; }
+  if(process.env.APP_SECRET && req.headers["x-app-secret"] !== process.env.APP_SECRET){ res.status(401).json({error:"unauthorized"}); return; }
+  const rl = rateCheck(clientIp(req));
+  if(rl.limited){ res.setHeader("Retry-After","30"); res.status(429).json({error: rl.scope==="global" ? "The copilot is busy right now — please try again in a moment." : "You're sending messages too quickly — please wait a few seconds and try again."}); return; }
+  let body = req.body;
+  if(!body || typeof body === "string"){ try{ body = JSON.parse(body||"{}"); }catch(e){ body = {}; } }
+  const messages = (body && body.messages) || [];
+  if(!Array.isArray(messages) || messages.length === 0){ res.status(400).json({error:"no messages provided"}); return; }
+  if(messages.length > MAX_MESSAGES){ res.status(400).json({error:"conversation too long — start a new chat"}); return; }
+  if(JSON.stringify(messages).length > MAX_PAYLOAD_CHARS){ res.status(413).json({error:"message payload too large"}); return; }
+  try{
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST",
+      headers:{ "content-type":"application/json", "x-api-key":key, "anthropic-version":"2023-06-01" },
+      body: JSON.stringify({
+        model: MODEL, max_tokens: 1024,
+        system: [{ type:"text", text: FULL_SYSTEM, cache_control:{ type:"ephemeral" } }],
+        tools: ALL_TOOLS,
+        messages
+      })
+    });
+    const data = await r.json();
+    res.status(r.status).json(data);
+  }catch(e){ res.status(502).json({error:String(e)}); }
+}
