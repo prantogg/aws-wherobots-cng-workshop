@@ -32,12 +32,14 @@
   // key -> column. Identity today, and still written out: the key is a public API (it appears
   // in shared links and in the model's tool schema) while the column is an extract detail.
   var METRIC_COLUMNS = {
-    composite: "composite",
-    wf_score: "wf_score",
-    hail_score: "hail_score",
-    flood_score: "flood_score",
-    wind_score: "wind_score",
-    access_score: "access_score"
+    insurance: "ins_score",
+    cre: "cre_score",
+    capital_markets: "cap_score",
+    energy: "en_score",
+    wildfire: "wildfire_factor",
+    flood: "flood_factor",
+    severe_weather: "severe_weather_factor",
+    outage_probability: "outage_probability"
   };
 
   var MAX_RADIUS_M = 80000;   // keeps partition pruning effective (plan section 5)

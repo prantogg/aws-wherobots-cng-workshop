@@ -32,8 +32,8 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
-  var DEFAULT_BASE = "https://co-pc-risk-tiles-benp-uw2.s3.us-west-2.amazonaws.com/tiles/query/";
-  var TABLE_PREFIX = "co_risk_query_";
+  var DEFAULT_BASE = "https://wherobots-cng-workshop-sd-uw2.s3.us-west-2.amazonaws.com/sd/query/";
+  var TABLE_PREFIX = "sd_risk_query_";
 
   /**
    * The engine-side relation name for one county file.
@@ -46,7 +46,7 @@
    * error. Including the version makes a different version a different relation, so a stale
    * registration cannot be reused by accident.
    */
-  function tableName(version, fips) { return TABLE_PREFIX + "v" + version + "_" + fips; }
+  function tableName(version, cell) { return TABLE_PREFIX + "v" + version + "_" + cell; }
   // WGS84, the datum the manifest bboxes and the query centre are in.
   var A = 6378137.0, E2 = 0.00669437999014;
   // Residual margin on top of the curvature maths: proportional, plus an absolute floor so a
@@ -105,9 +105,9 @@
     return [center.lon - dLon, south, center.lon + dLon, north];
   }
 
-  function versionRoot(version, base) { return (base || DEFAULT_BASE) + "co_risk_query.v" + version + "/"; }
+  function versionRoot(version, base) { return (base || DEFAULT_BASE) + "sd_risk_query.v" + version + "/"; }
   function manifestUrl(version, base) { return versionRoot(version, base) + "manifest.json"; }
-  function latestUrl(base) { return (base || DEFAULT_BASE) + "co_risk_query.latest.json"; }
+  function latestUrl(base) { return (base || DEFAULT_BASE) + "sd_risk_query.latest.json"; }
 
   function boxesIntersect(a, b) {
     return !(a[2] < b[0] || a[0] > b[2] || a[3] < b[1] || a[1] > b[3]);
@@ -121,18 +121,19 @@
    * outside Colorado has no data, and answering it with every county would be a slow way of
    * returning nothing.
    */
-  function selectCounties(manifest, center, radiusM, base) {
+  function selectFiles(manifest, center, radiusM, base) {
     var box = circleBox(center, radiusM);
     var root = versionRoot(manifest.version, base);
-    return (manifest.counties || [])
-      .filter(function (c) { return boxesIntersect(box, c.bbox); })
-      .map(function (c) {
+    // San Diego: one file per H3 res-5 cell (manifest.files), not one per county.
+    return (manifest.files || [])
+      .filter(function (f) { return boxesIntersect(box, f.bbox); })
+      .map(function (f) {
         return {
-          county: c.county,
-          name: c.name,
-          rows: c.rows,
-          url: root + c.path,
-          table: tableName(manifest.version, c.county)
+          cell: f.h3_5,
+          name: (f.places || []).slice(0, 3).join(", "),
+          rows: f.rows,
+          url: root + f.key,
+          table: tableName(manifest.version, f.h3_5)
         };
       });
   }
@@ -179,7 +180,7 @@
     meridionalRadius: meridionalRadius,
     primeVerticalRadius: primeVerticalRadius,
     boxesIntersect: boxesIntersect,
-    selectCounties: selectCounties,
+    selectFiles: selectFiles,
     resolveVersion: resolveVersion
   };
 });

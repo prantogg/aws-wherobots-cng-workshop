@@ -107,16 +107,14 @@
    * not what these numbers are (CLAUDE.md rules 1, 2, 3, 4).
    */
   var DISCLOSURE = {
-    grain: "Scored buildings from Overture, not parcels. Hazard is sampled at the building " +
-           "centroid.",
-    composite: "composite is a SCREENING SUM of five narrow scores (domain 0-7), not a loss " +
-               "estimate and not a determination of insurability.",
-    modeled: "wf/hail/flood/wind scores are MODELED or INHERITED from coarser resolution " +
-             "(USFS model output, FEMA NRI tract resolution, regulatory designation), not " +
-             "measured at the structure.",
-    access: "access_score is a 0/1 COHORT FLAG (1 = beyond the access boundary, including " +
-            "buildings with no fire station within 25 km). It is not a measurement.",
-    floors: "The building spine is a FLOOR, not a census.",
+    grain: "Scored buildings from Overture. Hazard is sampled per building footprint by the " +
+           "workshop pipeline (Part 1).",
+    tiers: "Risk tiers are PERCENTILE RANKS within San Diego County (top 5% critical), not " +
+           "absolute thresholds, and not a determination of insurability.",
+    lenses: "Each industry lens (insurance, CRE, capital markets, energy) weights wildfire, " +
+            "flood and severe weather differently, so the same building ranks differently.",
+    flood: "Flood comes from satellite radar (OPERA DSWx-S1) for December 2025 to March 2026; " +
+           "it is zero for almost every building in that window.",
     dollars: "No property value is in this dataset, so nothing here can be ranked by dollars."
   };
 
@@ -192,7 +190,7 @@
       });
     }).then(function (ctx) {
       var manifest = ctx.manifest;
-      var counties = registry.selectCounties(manifest, value.center, value.radius_m, base);
+      var counties = registry.selectFiles(manifest, value.center, value.radius_m, base);
       if (!counties.length) {
         // ⚠️ SAME SHAPE AS A SUCCESSFUL RESULT, INCLUDING center/radius_m/metric/limit/link.
         // An earlier version omitted them, and the renderer reads `res.center.lat` and
@@ -200,7 +198,7 @@
         // TypeError and the page rendered nothing at all, which is a worse answer than "there
         // is no data there".
         return result(ctx, value, [], counties, null, notices,
-                      "That point is outside the Colorado data in this map, so there is " +
+                      "That point is outside the San Diego County data in this map, so there is " +
                       "nothing to rank.");
       }
       var cover = h3cover.coverCircle(value.center, value.radius_m);
@@ -222,9 +220,11 @@
         // outside. Rounding is presentation, so it happens after the cut.
         var rows = raw.map(function (r) {
           return {
-            building_id: r.building_id, county: r.county,
-            composite: r.composite, wf_score: r.wf_score, hail_score: r.hail_score,
-            flood_score: r.flood_score, wind_score: r.wind_score, access_score: r.access_score,
+            building_id: r.building_id, place: r.place,
+            ins_score: r.ins_score, ins_tier: r.ins_tier, cre_score: r.cre_score, cre_tier: r.cre_tier,
+            cap_score: r.cap_score, en_score: r.en_score, en_tier: r.en_tier,
+            wildfire_factor: r.wildfire_factor, flood_factor: r.flood_factor,
+            severe_weather_factor: r.severe_weather_factor, outage_probability: r.outage_probability,
             lon: r.lon, lat: r.lat,
             dist_m: geodesic(value.center.lat, value.center.lon, r.lat, r.lon)
           };
