@@ -2,7 +2,7 @@
 """Copy an export run from Wherobots managed storage to the public app bucket.
 
     set -a; source .env; set +a                        # WHEROBOTS_API_KEY
-    AWS_PROFILE=<profile> python3 part2_map_app/data/publish.py <version> [--dry-run]
+    AWS_PROFILE=<profile> python3 part2_map_app/data/publish.py <version> [--carry-tiles <old>] [--dry-run]
 
 Reads <managed>/cng-app/v<version>/ (written by export_sd_app_data.py) and lays it out as the
 app expects:
@@ -12,8 +12,11 @@ app expects:
     s3://<bucket>/sd/query/sd_risk_query.v<version>/cell=<h3_5>/part.parquet
     s3://<bucket>/sd/query/sd_risk_query.latest.json      (written last)
 
-and copies app/hexes.json and app/places.json next to index.html. Versions are immutable: an
-existing manifest for <version> stops the run. The Wherobots API key is only ever sent to the
+and copies app/hexes.json and app/places.json next to index.html. A tiles-only export (no
+query/manifest.json) publishes only its tiles and leaves the query extract and the latest
+pointer alone; --carry-tiles <old> copies any tile file it did not produce from v<old>
+(server-side). Versions are immutable: an existing manifest or tile set for <version> stops
+the run. The Wherobots API key is only ever sent to the
 Wherobots API; download redirects are followed without it.
 """
 import json
@@ -26,6 +29,10 @@ import urllib.request
 from pathlib import Path
 
 import boto3
+import gzip as _gzip
+from pmtiles.reader import MmapSource, Reader, all_tiles
+from pmtiles.tile import Compression, zxy_to_tileid
+from pmtiles.writer import Writer
 
 API = "https://api.cloud.wherobots.com"
 BUCKET = os.environ.get("APP_BUCKET", "wherobots-cng-workshop-sd-uw2")
@@ -92,14 +99,34 @@ def download(storage_id, path, dest):
             f.write(chunk)
 
 
+def gzip_tiles(path):
+    """Rewrite a PMTiles archive with gzip-compressed tiles if it has none (wherobots.vtiles
+    writes uncompressed tiles; gzip cuts the county view's download about 5x). Returns the
+    path to upload."""
+    with open(path, "rb") as f:
+        r = Reader(MmapSource(f))
+        header, metadata = r.header(), r.metadata()
+        if header["tile_compression"] != Compression.NONE:
+            return path
+        out = str(path) + ".gz.pmtiles"
+        with open(out, "wb") as o:
+            w = Writer(o)
+            for (z, x, y), data in all_tiles(r.get_bytes):
+                w.write_tile(zxy_to_tileid(z, x, y), _gzip.compress(data, 6))
+            header["tile_compression"] = Compression.GZIP
+            w.finalize(header, metadata)
+    return out
+
+
 def content_type(name):
     return "application/json" if name.endswith(".json") else "application/octet-stream"
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    dry = "--dry-run" in sys.argv
-    version = args[0]
+    argv = sys.argv[1:]
+    dry = "--dry-run" in argv
+    carry = argv[argv.index("--carry-tiles") + 1] if "--carry-tiles" in argv else None
+    version = [a for a in argv if not a.startswith("--") and a != carry][0]
     storage_id, default_dir = managed()
     root = f"/{default_dir}/cng-app/v{version}"
     files = list_files(storage_id, root)
@@ -107,8 +134,10 @@ def main():
 
     s3 = boto3.client("s3", region_name=REGION)
     qprefix = f"sd/query/sd_risk_query.v{version}/"
+    has_query = "query/manifest.json" in files
+    guard = qprefix + "manifest.json" if has_query else f"sd/v{version}/tiles/" + next(f for f in files if f.startswith("tiles/"))[len("tiles/"):]
     try:
-        s3.head_object(Bucket=BUCKET, Key=qprefix + "manifest.json")
+        s3.head_object(Bucket=BUCKET, Key=guard)
         sys.exit(f"version {version} is already published; versions are immutable")
     except s3.exceptions.ClientError as e:
         if e.response["Error"]["Code"] not in ("404", "NoSuchKey", "403"):
@@ -124,8 +153,15 @@ def main():
             plan.append((f, None))
     manifest = [p for p in plan if p[0] == "query/manifest.json"]
     plan = [p for p in plan if p[0] != "query/manifest.json"] + manifest   # manifest after its files
+    carried = []
+    if carry:
+        have = {f[len("tiles/"):] for f in files if f.startswith("tiles/")}
+        old = s3.list_objects_v2(Bucket=BUCKET, Prefix=f"sd/v{carry}/tiles/").get("Contents", [])
+        carried = [o["Key"] for o in old if o["Key"].rsplit("/", 1)[-1] not in have]
     for src, dst in plan:
         print(f"  {src} -> {dst or 'part2_map_app/' + Path(src).name}")
+    for k in carried:
+        print(f"  (copy) {k} -> sd/v{version}/tiles/{k.rsplit('/', 1)[-1]}")
     if dry:
         return
 
@@ -136,11 +172,19 @@ def main():
             if dst is None:
                 (APP_DIR / Path(src).name).write_bytes(local.read_bytes())
             else:
-                s3.upload_file(str(local), BUCKET, dst, ExtraArgs={"ContentType": content_type(dst)})
+                up = gzip_tiles(local) if dst.endswith(".pmtiles") else str(local)
+                s3.upload_file(up, BUCKET, dst, ExtraArgs={"ContentType": content_type(dst)})
+                if up != str(local):
+                    print(f"  gzipped {Path(src).name}: {local.stat().st_size/1e6:.0f} MB -> {Path(up).stat().st_size/1e6:.0f} MB")
+                    Path(up).unlink()
             local.unlink()
-    s3.put_object(Bucket=BUCKET, Key="sd/query/sd_risk_query.latest.json",
-                  Body=json.dumps({"version": version}).encode(), ContentType="application/json",
-                  CacheControl="no-cache")
+    for k in carried:
+        s3.copy_object(Bucket=BUCKET, Key=f"sd/v{version}/tiles/{k.rsplit('/', 1)[-1]}",
+                       CopySource={"Bucket": BUCKET, "Key": k})
+    if has_query:
+        s3.put_object(Bucket=BUCKET, Key="sd/query/sd_risk_query.latest.json",
+                      Body=json.dumps({"version": version}).encode(), ContentType="application/json",
+                      CacheControl="no-cache")
     print(f"published v{version} to s3://{BUCKET}/sd/")
 
 
