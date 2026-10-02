@@ -9,8 +9,7 @@ Adapted from Ben Pruden's Colorado property risk explorer (its history is kept i
 ## Run it locally (workshop)
 
 ```bash
-source .venv/bin/activate               # the venv from Setup, Lab 01
-python part2_map_app/serve.py
+.venv/bin/python part2_map_app/serve.py   # from the repo root, with the venv from Setup (Lab 01)
 ```
 
 Open http://localhost:8765. The copilot runs on Amazon Bedrock with your workshop AWS
@@ -26,12 +25,12 @@ building-level question downloads the ~10 MB query engine, so it takes a few sec
 | Piece | What it is |
 |---|---|
 | `index.html` | MapLibre GL JS map, OpenFreeMap basemap, and the copilot loop. Tool calls run in the browser |
-| PMTiles | `sd_hex` (H3 res-7 averages), `sd_buildings` (footprints, z14+), `sd_places` (city boundaries) |
+| PMTiles | `sd_points` (every building as a dot, z9–12, risk drawn on top), `sd_buildings` (footprints, z12+), `sd_hex` (H3 res-7 averages: the view below z9, otherwise the Hexagons toggle), `sd_places` (city boundaries). Tiles are gzipped at publish time: the county view is about 7 MB |
 | `query/` | The SedonaDB WASM engine seam: picks the GeoParquet files a query touches (H3 res-5 cells), builds SQL from typed arguments, runs it in the browser |
 | `copilot.json` | The copilot's system prompt and tools, shared by both chat backends |
 | `serve.py` | Local server: static files plus `/api/chat` on Bedrock |
 | `api/chat.js` | The same `/api/chat` for Vercel, on the Anthropic API |
-| `data/` | `publish.py` copies an export from Wherobots to the public bucket; `build_app_data.py` regenerates `copilot.json`, the gazetteer and the data version |
+| `data/` | `export_sd_app_data.py` and `export_sd_tiles.py` run on Wherobots; `publish.py` copies an export to the public bucket (gzipping tiles); `build_app_data.py` regenerates `copilot.json`, the gazetteer and the data version |
 
 The model never writes SQL: `query_properties` takes a place, a radius, a metric and a limit,
 and `query/sqlbuild.js` builds the statement from a fixed template.
