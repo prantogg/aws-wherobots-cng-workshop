@@ -1,17 +1,17 @@
-"""Export San Diego County Gold for the Part 2 map app (PMTiles + browser-queryable GeoParquet).
+"""Export the City of San Diego Gold for the Part 2 map app (PMTiles + the app's JSON files).
 
-Layout follows Ben Pruden's CO risk explorer contract (pipelines/co-risk/export/10 and 40):
-  <USER_S3_PATH>cng-app/v<YYYYMMDD>/
-      tiles/sd_hex.pmtiles          H3 res-7 aggregates
-      tiles/sd_buildings.pmtiles    building footprints, z14-16
-      tiles/sd_places.pmtiles       incorporated city boundaries
-      query/manifest.json           per-file bbox + counts (the browser HEADs and reads it)
-      query/cell=<h3_5>/part.parquet  one file per H3 res-5 cell, sorted by (h3_6, h3_7)
-      app/hexes.json, app/places.json   small files the app ships
+Reads org_catalog.gold as Part 1 writes it (City of San Diego AOI) and writes
+<USER_S3_PATH>cng-app/v<YYYYMMDD>/:
+    tiles/sd_points.pmtiles       every building as a dot, z9-12
+    tiles/sd_buildings.pmtiles    building footprints, z12-16
+    tiles/sd_hex.pmtiles          H3 res-8 aggregates
+    tiles/sd_places.pmtiles       the city boundary
+    app/hexes.json, app/places.json   small files the app ships
 
-Rules carried over: geometry for the query extract is EPSG:5070 centroids as standard WKB
-(ST_AsBinary), each file keeps its partition column as data, rows are sorted by H3 so row-group
-statistics prune, the row-group budget is small, and nothing licensed is selected.
+Building-level questions are not served from here: the app runs them against each participant's
+own Gold tables through the Wherobots MCP (serve.py). Places are Overture macrohoods (the
+community names people use: La Jolla, North Park, Tierrasanta): each building takes the nearest
+macrohood point inside the city. Overture's finer `neighborhood` points are too patchy to name by.
 """
 import json
 import os
@@ -30,7 +30,6 @@ VERSION = time.strftime("%Y%m%d", time.gmtime())
 ROOT = f"{BASE}cng-app/v{VERSION}/"
 GOLD = "org_catalog.gold"
 OVR = "wherobots_open_data.overture_maps_foundation"
-PARQUET_BLOCK_BYTES = 137_500
 
 
 def _path(p):
@@ -69,112 +68,44 @@ log(f"gold buildings: {TOTAL:,}")
 
 # ---------------------------------------------------------------- places (Overture)
 sedona.sql(f"""
-  CREATE OR REPLACE TEMP VIEW county AS
+  CREATE OR REPLACE TEMP VIEW city AS
   SELECT geometry AS g FROM {OVR}.divisions_division_area
-  WHERE country='US' AND region='US-CA' AND subtype='county'
-    AND names.primary='San Diego County' AND class='land'
+  WHERE country='US' AND region='US-CA' AND subtype='locality' AND class='land'
+    AND names.primary='San Diego'
 """)
+assert sedona.table("city").count() == 1, "expected one City of San Diego boundary"
 sedona.sql(f"""
-  CREATE OR REPLACE TEMP VIEW cities AS
-  SELECT d.names.primary AS place, d.geometry AS g
-  FROM {OVR}.divisions_division_area d, county c
-  WHERE d.country='US' AND d.region='US-CA' AND d.subtype='locality' AND d.class='land'
-    AND ST_Intersects(d.geometry, c.g)
-    AND ST_Area(ST_Intersection(d.geometry, c.g)) > 0.5 * ST_Area(d.geometry)
-""")
-sedona.sql(f"""
-  CREATE OR REPLACE TEMP VIEW communities AS
+  CREATE OR REPLACE TEMP VIEW hoods AS
   SELECT DISTINCT d.names.primary AS place, d.geometry AS p
-  FROM {OVR}.divisions_division d, county c
-  WHERE d.country='US' AND d.region='US-CA' AND d.subtype='locality'
+  FROM {OVR}.divisions_division d, city c
+  WHERE d.country='US' AND d.region='US-CA' AND d.subtype='macrohood'
     AND ST_Intersects(d.geometry, c.g)
-    AND NOT EXISTS (SELECT 1 FROM cities k WHERE ST_Intersects(d.geometry, k.g))
 """)
-log(f"places: {sedona.table('cities').count()} cities, {sedona.table('communities').count()} communities")
+log(f"places: {sedona.table('hoods').count()} Overture neighbourhoods in the city")
 
 sedona.sql("""
-  CREATE OR REPLACE TEMP VIEW in_city AS
-  SELECT s.building_id, k.place
-  FROM spine s JOIN cities k ON ST_Intersects(s.c0, k.g)
-""")
-sedona.sql("""
-  CREATE OR REPLACE TEMP VIEW near_community AS
+  CREATE OR REPLACE TEMP VIEW nearest AS
   SELECT building_id, place FROM (
-    SELECT s.building_id, m.place,
+    SELECT s.building_id, h.place,
            ROW_NUMBER() OVER (PARTITION BY s.building_id
-                              ORDER BY ST_DistanceSphere(s.c0, m.p), m.place) AS rk
-    FROM spine s CROSS JOIN communities m
-    WHERE s.building_id NOT IN (SELECT building_id FROM in_city)
-      AND ST_DistanceSphere(s.c0, m.p) <= 10000
+                              ORDER BY ST_DistanceSphere(s.c0, h.p), h.place) AS rk
+    FROM spine s CROSS JOIN hoods h
   ) WHERE rk = 1
 """)
 b = sedona.sql("""
-  SELECT s.*,
-         COALESCE(ic.place, nc.place, 'Unincorporated San Diego County') AS place,
-         CASE WHEN ic.place IS NOT NULL THEN 'city'
-              WHEN nc.place IS NOT NULL THEN 'community' ELSE 'unincorporated' END AS place_type,
+  SELECT s.*, COALESCE(n.place, 'San Diego') AS place, 'neighborhood' AS place_type,
          ST_X(s.c0) AS lon, ST_Y(s.c0) AS lat,
-         element_at(ST_H3CellIDs(s.c0, 5, false), 1) AS h3_5,
-         element_at(ST_H3CellIDs(s.c0, 6, false), 1) AS h3_6,
-         element_at(ST_H3CellIDs(s.c0, 7, false), 1) AS h3_7
-  FROM spine s
-  LEFT JOIN (SELECT building_id, FIRST(place) place FROM in_city GROUP BY building_id) ic
-         ON s.building_id = ic.building_id
-  LEFT JOIN near_community nc ON s.building_id = nc.building_id
+         element_at(ST_H3CellIDs(s.c0, 8, false), 1) AS h3_8
+  FROM spine s LEFT JOIN nearest n ON s.building_id = n.building_id
 """).persist()
 b.createOrReplaceTempView("b")
 n = b.count()
 log(f"[{'PASS' if n == TOTAL else 'FAIL'}] spine rows {n:,} (gold {TOTAL:,})")
 assert n == TOTAL, "spine lost or duplicated buildings"
 
-# ---------------------------------------------------------------- query extract
-QCOLS = ["building_id", "geom_5070", "place", "ins_score", "ins_tier", "cre_score", "cre_tier",
-         "cap_score", "en_score", "en_tier", "wildfire_factor", "flood_factor",
-         "severe_weather_factor", "outage_probability", "lon", "lat", "h3_5", "h3_6", "h3_7"]
-q = sedona.sql("""
-  SELECT building_id,
-         ST_AsBinary(ST_Transform(c0, 'EPSG:4326', 'EPSG:5070')) AS geom_5070,
-         place, ins_score, ins_tier, cre_score, cre_tier, cap_score, en_score, en_tier,
-         wildfire_factor, flood_factor, severe_weather_factor, outage_probability,
-         lon, lat, h3_5, h3_6, h3_7
-  FROM b
-""")
-assert q.columns == QCOLS, q.columns
-cells = [r["h3_5"] for r in q.select("h3_5").distinct().orderBy("h3_5").collect()]
-log(f"query extract: {len(cells)} H3 res-5 files")
-files, written = [], 0
-for cell in cells:
-    part = q.where(q.h3_5 == cell)
-    tmp = f"{ROOT}query/_tmp_{cell}/"
-    (part.repartition(1).sortWithinPartitions("h3_6", "h3_7")
-         .write.option("parquet.block.size", PARQUET_BLOCK_BYTES).mode("overwrite").parquet(tmp))
-    src = _path(tmp)
-    fs = src.getFileSystem(hconf)
-    parts = [s.getPath() for s in fs.globStatus(_path(tmp + "part-*.parquet"))]
-    assert len(parts) == 1, (cell, len(parts))
-    dst = _path(f"{ROOT}query/cell={cell}/part.parquet")
-    fs.mkdirs(dst.getParent())
-    assert fs.rename(parts[0], dst), f"rename failed for {cell}"
-    fs.delete(src, True)
-    st = part.selectExpr("COUNT(*) n", "MIN(lon) xmin", "MAX(lon) xmax", "MIN(lat) ymin",
-                         "MAX(lat) ymax", "concat_ws('|', sort_array(collect_set(place))) places").collect()[0]
-    files.append({"key": f"cell={cell}/part.parquet", "h3_5": str(cell), "rows": st["n"],
-                  "bbox": [round(st["xmin"], 5), round(st["ymin"], 5), round(st["xmax"], 5), round(st["ymax"], 5)],
-                  "places": st["places"].split("|")})
-    written += st["n"]
-log(f"[{'PASS' if written == TOTAL else 'FAIL'}] extract rows {written:,}")
-assert written == TOTAL
-write_text(f"{ROOT}query/manifest.json", json.dumps({
-    "version": VERSION, "rows": TOTAL, "columns": QCOLS, "crs": "EPSG:5070 (geom_5070, centroid WKB)",
-    "partition": "H3 res 5 (h3_5); rows sorted by h3_6, h3_7",
-    "disclosure": "Risk tiers are percentile ranks within San Diego County; scores are screening "
-                  "signals from the workshop pipeline, not insurability determinations.",
-    "files": files}, indent=1))
-log("wrote query/manifest.json")
-
 # ---------------------------------------------------------------- app data files
 hexes = sedona.sql("""
-  SELECT CAST(h3_7 AS STRING) id, ROUND(AVG(lon), 4) lon, ROUND(AVG(lat), 4) lat,
+  SELECT CAST(h3_8 AS STRING) id, ROUND(AVG(lon), 4) lon, ROUND(AVG(lat), 4) lat,
          MODE(place) pl, COUNT(*) b,
          SUM(CASE WHEN ins_tier='critical' THEN 1 ELSE 0 END) ic,
          SUM(CASE WHEN ins_tier='high' THEN 1 ELSE 0 END) ih,
@@ -184,7 +115,7 @@ hexes = sedona.sql("""
          ROUND(AVG(cap_score), 4) s_cap, ROUND(AVG(en_score), 4) s_en,
          ROUND(AVG(wildfire_factor), 4) wf,
          ROUND(AVG(flood_factor), 4) fl, ROUND(AVG(severe_weather_factor), 4) sw
-  FROM b GROUP BY h3_7
+  FROM b GROUP BY h3_8
 """).collect()
 write_text(f"{ROOT}app/hexes.json", json.dumps([r.asDict() for r in hexes], separators=(",", ":")))
 places = sedona.sql("""
@@ -212,8 +143,8 @@ from wherobots import vtiles
 
 sc.setCheckpointDir(f"{BASE}tilegen-ckpt/{uuid.uuid4().hex}/")
 hex_df = sedona.sql("""
-  SELECT 'hex' AS layer, element_at(ST_H3ToGeom(array(h3_7)), 1) AS geometry,
-         CAST(h3_7 AS STRING) AS h3, MODE(place) AS place, COUNT(*) AS buildings,
+  SELECT 'hex' AS layer, element_at(ST_H3ToGeom(array(h3_8)), 1) AS geometry,
+         CAST(h3_8 AS STRING) AS h3, MODE(place) AS place, COUNT(*) AS buildings,
          SUM(CASE WHEN ins_tier='critical' THEN 1 ELSE 0 END) AS ins_critical,
          SUM(CASE WHEN ins_tier='high' THEN 1 ELSE 0 END) AS ins_high,
          SUM(CASE WHEN cre_tier='critical' THEN 1 ELSE 0 END) AS cre_critical,
@@ -222,14 +153,30 @@ hex_df = sedona.sql("""
          AVG(cap_score) AS avg_cap_score, AVG(en_score) AS avg_en_score,
          AVG(wildfire_factor) AS avg_wildfire, AVG(flood_factor) AS avg_flood,
          AVG(severe_weather_factor) AS avg_severe_weather
-  FROM b GROUP BY h3_7
+  FROM b GROUP BY h3_8
 """)
 t0 = time.time(); vtiles.generate_pmtiles(hex_df, f"{ROOT}tiles/sd_hex.pmtiles")
 log(f"wrote tiles/sd_hex.pmtiles in {time.time()-t0:.0f}s")
 
-places_df = sedona.sql("SELECT 'places' AS layer, g AS geometry, place FROM cities")
+places_df = sedona.sql("SELECT 'places' AS layer, g AS geometry, 'San Diego' AS place FROM city")
 t0 = time.time(); vtiles.generate_pmtiles(places_df, f"{ROOT}tiles/sd_places.pmtiles")
 log(f"wrote tiles/sd_places.pmtiles in {time.time()-t0:.0f}s")
+
+TIER_INT = "CASE {c} WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'elevated' THEN 2 WHEN 'moderate' THEN 1 ELSE 0 END"
+pct = lambda c: f"CAST(ROUND(COALESCE({c}, 0) * 100) AS INT)"
+points = sedona.sql(f"""
+  SELECT 'points' AS layer, c0 AS geometry,
+         {TIER_INT.format(c="ins_tier")} AS ins_t, {TIER_INT.format(c="cre_tier")} AS cre_t,
+         {TIER_INT.format(c="en_tier")} AS en_t,
+         {pct("ins_score")} AS ins_s, {pct("cre_score")} AS cre_s, {pct("cap_score")} AS cap_s,
+         {pct("en_score")} AS en_s, {pct("wildfire_factor")} AS wf, {pct("flood_factor")} AS fl,
+         {pct("severe_weather_factor")} AS sw
+  FROM b
+""")
+t0 = time.time()
+vtiles.generate_pmtiles(points, f"{ROOT}tiles/sd_points.pmtiles",
+                        vtiles.GenerationConfig(min_zoom=9, max_zoom=12, max_features_per_tile=1_200_000))
+log(f"wrote tiles/sd_points.pmtiles in {time.time()-t0:.0f}s")
 
 bld_df = sedona.sql("""
   SELECT 'buildings' AS layer, geometry, building_id, place, building_class,
@@ -243,6 +190,6 @@ bld_df = sedona.sql("""
 """)
 t0 = time.time()
 vtiles.generate_pmtiles(bld_df, f"{ROOT}tiles/sd_buildings.pmtiles",
-                        vtiles.GenerationConfig(min_zoom=14, max_zoom=16, max_features_per_tile=200_000))
-log(f"wrote tiles/sd_buildings.pmtiles in {time.time()-t0:.0f}s")
+                        vtiles.GenerationConfig(min_zoom=12, max_zoom=16, max_features_per_tile=400_000))
+log(f"wrote tiles/sd_buildings.pmtiles (z12-16) in {time.time()-t0:.0f}s")
 log(f"DONE {ROOT}")

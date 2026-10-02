@@ -2,22 +2,16 @@
 """Copy an export run from Wherobots managed storage to the public app bucket.
 
     set -a; source .env; set +a                        # WHEROBOTS_API_KEY
-    AWS_PROFILE=<profile> python3 part2_map_app/data/publish.py <version> [--carry-tiles <old>] [--dry-run]
+    AWS_PROFILE=<profile> .venv/bin/python part2_map_app/data/publish.py <version> [--as <published>] [--carry-tiles <old>] [--dry-run]
 
-Reads <managed>/cng-app/v<version>/ (written by export_sd_app_data.py) and lays it out as the
-app expects:
-
-    s3://<bucket>/sd/v<version>/tiles/*.pmtiles
-    s3://<bucket>/sd/query/sd_risk_query.v<version>/manifest.json
-    s3://<bucket>/sd/query/sd_risk_query.v<version>/cell=<h3_5>/part.parquet
-    s3://<bucket>/sd/query/sd_risk_query.latest.json      (written last)
-
-and copies app/hexes.json and app/places.json next to index.html. A tiles-only export (no
-query/manifest.json) publishes only its tiles and leaves the query extract and the latest
-pointer alone; --carry-tiles <old> copies any tile file it did not produce from v<old>
-(server-side). Versions are immutable: an existing manifest or tile set for <version> stops
-the run. The Wherobots API key is only ever sent to the
-Wherobots API; download redirects are followed without it.
+Needs `pip install pmtiles` (maintainers only; participants never run this). Reads
+<managed>/cng-app/v<version>/ (written by export_sd_app_data.py), uploads its tiles to
+s3://<bucket>/sd/v<version>/tiles/*.pmtiles and copies app/hexes.json and app/places.json next
+to index.html. --as publishes the run under another version (exports are stamped with the
+day they ran, which may already be taken). --carry-tiles <old> copies any tile file it did not produce from v<old>
+(server-side). Versions are immutable: an existing tile set for <version> stops the run. The
+Wherobots API key is only ever sent to the Wherobots API; download redirects are followed
+without it.
 """
 import json
 import os
@@ -126,16 +120,16 @@ def main():
     argv = sys.argv[1:]
     dry = "--dry-run" in argv
     carry = argv[argv.index("--carry-tiles") + 1] if "--carry-tiles" in argv else None
-    version = [a for a in argv if not a.startswith("--") and a != carry][0]
+    alias = argv[argv.index("--as") + 1] if "--as" in argv else None
+    source = [a for a in argv if not a.startswith("--") and a not in (carry, alias)][0]
+    version = alias or source
     storage_id, default_dir = managed()
-    root = f"/{default_dir}/cng-app/v{version}"
+    root = f"/{default_dir}/cng-app/v{source}"
     files = list_files(storage_id, root)
     print(f"{len(files)} files under {root}")
 
     s3 = boto3.client("s3", region_name=REGION)
-    qprefix = f"sd/query/sd_risk_query.v{version}/"
-    has_query = "query/manifest.json" in files
-    guard = qprefix + "manifest.json" if has_query else f"sd/v{version}/tiles/" + next(f for f in files if f.startswith("tiles/"))[len("tiles/"):]
+    guard = f"sd/v{version}/tiles/" + next(f for f in files if f.startswith("tiles/"))[len("tiles/"):]
     try:
         s3.head_object(Bucket=BUCKET, Key=guard)
         sys.exit(f"version {version} is already published; versions are immutable")
@@ -147,12 +141,8 @@ def main():
     for f in files:
         if f.startswith("tiles/"):
             plan.append((f, f"sd/v{version}/{f}"))
-        elif f.startswith("query/") and "/_tmp_" not in f:
-            plan.append((f, qprefix + f[len("query/"):]))
         elif f.startswith("app/"):
             plan.append((f, None))
-    manifest = [p for p in plan if p[0] == "query/manifest.json"]
-    plan = [p for p in plan if p[0] != "query/manifest.json"] + manifest   # manifest after its files
     carried = []
     if carry:
         have = {f[len("tiles/"):] for f in files if f.startswith("tiles/")}
@@ -181,10 +171,6 @@ def main():
     for k in carried:
         s3.copy_object(Bucket=BUCKET, Key=f"sd/v{version}/tiles/{k.rsplit('/', 1)[-1]}",
                        CopySource={"Bucket": BUCKET, "Key": k})
-    if has_query:
-        s3.put_object(Bucket=BUCKET, Key="sd/query/sd_risk_query.latest.json",
-                      Body=json.dumps({"version": version}).encode(), ContentType="application/json",
-                      CacheControl="no-cache")
     print(f"published v{version} to s3://{BUCKET}/sd/")
 
 
