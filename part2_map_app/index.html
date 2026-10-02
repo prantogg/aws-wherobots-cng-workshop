@@ -3,22 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>San Diego Building Risk — Map + Copilot</title>
+<title>San Diego Building Risk</title>
 <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
-<!-- "Ask the data": spatial SQL in the browser (SedonaDB WASM) over the GeoParquet extract.
-     Plain scripts, no build step. The engine loads lazily, when the copilot opens. -->
-<script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"
-        integrity="sha256-CHDZTeOFA732tj3OjEgSpC3ENWXxWuNWlK7fT5fq9Ug="
-        crossorigin="anonymous"></script>
-<script src="query/validate.js"></script>
-<script src="query/h3cover.js"></script>
-<script src="query/registry.js"></script>
-<script src="query/sqlbuild.js"></script>
+<!-- Place names the copilot can use as a query centre. Building queries themselves run on the
+     participant's own Gold tables through the Wherobots MCP (/api/query in serve.py). -->
 <script src="query/gazetteer.js"></script>
-<script src="query/engine.js"></script>
-<script src="query/executor.js"></script>
 <style>
   :root{--ink:#1d2433;--muted:#667085;--line:#e4e7ec;--accent:#3b5bdb;--panel:#fff;
         --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
@@ -67,7 +58,7 @@
 <div id="map"></div>
 
 <div class="panel">
-  <h1>San Diego County building risk</h1>
+  <h1>City of San Diego building risk</h1>
   <div class="sub" id="sub">Loading…</div>
   <div class="lab">Industry lens</div>
   <div class="chips" id="lenses"></div>
@@ -79,7 +70,7 @@
   <div class="note" id="legend-note"></div>
   <div class="lab" id="places-title">Places</div>
   <div class="places" id="places"></div>
-  <div class="note">Risk tiers are percentile ranks within the county, not insurability determinations.
+  <div class="note">Risk tiers are percentile ranks within the city, not insurability determinations.
     Data: Overture Maps (buildings, places), USFS, NASA OPERA, NOAA SWDI, scored with Wherobots.
     App by Ben Pruden, adapted for the CNG workshop.</div>
 </div>
@@ -91,12 +82,12 @@
   <div class="cop-head"><span>Risk copilot</span><span class="cop-x" id="cop-x">×</span></div>
   <div class="cop-msgs" id="cop-msgs"></div>
   <div class="cop-input"><textarea id="cop-text" rows="2" placeholder="Ask about places, hazards or buildings…"></textarea><button id="cop-send">Send</button></div>
-  <div class="cop-note">Answers use this map's data only. Building questions run SQL in your browser (SedonaDB).</div>
+  <div class="cop-note">Answers use this map's data only. Building questions run SQL on your Wherobots Gold tables.</div>
 </div>
 
 <script>
 // ---------------------------------------------------------------- data locations
-const DATA_VERSION = "20261002";   // set by data/build_app_data.py
+const DATA_VERSION = "20261004";   // set by data/build_app_data.py
 const BUCKET = "https://wherobots-cng-workshop-sd-uw2.s3.us-west-2.amazonaws.com/sd/";
 const TILES = BUCKET + "v" + DATA_VERSION + "/tiles/";
 
@@ -140,7 +131,7 @@ const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
 const map = new maplibregl.Map({
   container:"map", style:"https://tiles.openfreemap.org/styles/positron",
-  center:[-116.75, 33.02], zoom:9.2, attributionControl:{compact:true}
+  center:[-117.13, 32.83], zoom:10, attributionControl:{compact:true}
 });
 map.addControl(new maplibregl.NavigationControl({showCompass:false}), "bottom-right");
 
@@ -254,7 +245,7 @@ function renderLegend(){
     title.textContent = H.label + " factor";
     el.innerHTML = stopsFor(HEXES.map(h => h[H.hj]), H.ramp)
       .map(([v,c]) => `<div class="row"><span class="sw" style="background:${c}"></span>${v.toFixed(3)}</div>`).join("");
-    note.textContent = state.hazard === "flood" ? "Flood is satellite-observed water, Dec 2025 – Mar 2026: zero almost everywhere." : "Normalised 0–1 within the county.";
+    note.textContent = state.hazard === "flood" ? "Flood is satellite-observed water, Dec 2025 – Mar 2026: zero almost everywhere." : "Normalised 0–1 within the city.";
   }
 }
 function placeMetric(p){
@@ -300,30 +291,26 @@ function wireInteractions(){
 }
 
 // ---------------------------------------------------------------- query results
+const METRIC_COLUMNS = { insurance:"ins_score", cre:"cre_score", capital_markets:"cap_score", energy:"en_score",
+  wildfire:"wildfire_factor", flood:"flood_factor", severe_weather:"severe_weather_factor", outage_probability:"outage_probability" };
+function nearestPlace(lon, lat){
+  let best = null, bd = Infinity;
+  for(const p of PLACES){ const d = (p.lon - lon) ** 2 + (p.lat - lat) ** 2; if(d < bd){ bd = d; best = p; } }
+  return best ? best.place : "";
+}
 function renderQueryResults(res, label){
-  const metricKey = res.metric, col = CoRiskQuery.validate.METRIC_COLUMNS[metricKey];
+  const metricKey = res.metric, col = METRIC_COLUMNS[metricKey];
   const feats = res.rows.map((r, i) => ({ type:"Feature", geometry:{ type:"Point", coordinates:[r.lon, r.lat] },
     properties:{ rank:i+1, place:r.place, score:r[col], dist_m:r.dist_m } }));
   setPoints("qres", feats);
   const qp = document.getElementById("qpanel");
   qp.innerHTML = `<h2><span>Top ${res.rows.length} by ${esc(metricKey)}${label ? " · " + esc(label) : ""}</span><span class="cop-x" id="q-x">×</span></h2>` +
-    `<div class="note">Within ${fmt(Math.round(res.radius_m))} m · data v${esc(res.version)} · ran in your browser</div>` +
+    `<div class="note">Within ${fmt(Math.round(res.radius_m))} m · your Gold tables via the Wherobots MCP · ${res.seconds} s</div>` +
     res.rows.map((r, i) => `<div class="r" data-i="${i}"><span>#${i+1} ${esc(r.place)}</span><span>${(+r[col]).toFixed(3)}</span></div>`).join("");
   qp.style.display = res.rows.length ? "block" : "none";
   document.getElementById("q-x").onclick = () => { qp.style.display = "none"; setPoints("qres", []); };
   qp.querySelectorAll(".r").forEach(el => el.onclick = () => { const r = res.rows[+el.dataset.i]; map.flyTo({ center:[r.lon, r.lat], zoom:16 }); });
   if(feats.length){ const b = new maplibregl.LngLatBounds(); feats.forEach(f => b.extend(f.geometry.coordinates)); map.fitBounds(b, { padding:90, maxZoom:15 }); }
-}
-
-// ---------------------------------------------------------------- query engine (lazy)
-let _engine = null;
-function warmQueryEngine(){ if(_engine || CoRiskQuery.engine.isLoaded()) return;
-  CoRiskQuery.engine.load({}).then(e => { if(!_engine) _engine = e; }, () => {}); }
-async function loadQueryEngine(){
-  if(_engine && !_engine.dead) return _engine;
-  copThink(true, "Loading the in-browser query engine (first question only)…");
-  _engine = await CoRiskQuery.engine.load({});
-  return _engine;
 }
 
 // ---------------------------------------------------------------- copilot tools (run in the browser)
@@ -340,12 +327,12 @@ const mapTools = {
   set_hazard: ({hazard}) => { if(!HAZARDS[hazard]) return {error:"unknown hazard " + hazard}; state.hazard = hazard; buildChips(); applyStyle(); return {ok:true, hazard}; },
   get_map_state: () => ({ lens:state.lens, hazard:state.hazard, zoom:+map.getZoom().toFixed(1),
     center:map.getCenter().toArray().map(v => +v.toFixed(4)) }),
-  fit_county: () => { map.flyTo({ center:[-116.75, 33.02], zoom:9.2 }); return {ok:true}; },
+  fit_city: () => { map.flyTo({ center:[-117.13, 32.83], zoom:10 }); return {ok:true}; },
   focus_place: ({name}) => { const p = findPlace(name); if(!p) return {error:"unknown place: " + name};
     map.fitBounds([[p.xmin, p.ymin], [p.xmax, p.ymax]], { padding:60, maxZoom:14 }); return placeSummary(p); },
-  find_top_places: ({lens = state.lens, by = "critical", n = 10, type = "any"}) => {
+  find_top_places: ({lens = state.lens, by = "critical", n = 10}) => {
     const L = LENSES[lens] || LENSES.insurance; n = Math.max(1, Math.min(25, n | 0 || 10));
-    let rows = PLACES.filter(p => type === "any" || p.type === type);
+    let rows = PLACES.slice();
     const key = p => by === "wildfire_exposed" ? p.wildfire_exposed
       : by === "share" ? (L.crit ? p[L.crit] / p.buildings : 0)
       : by === "avg_score" ? p["avg_" + (lens === "capital_markets" ? "cap" : lens === "energy" ? "en" : lens === "cre" ? "cre" : "ins") + "_score"]
@@ -362,7 +349,7 @@ const mapTools = {
     rows = rows.sort((a,b) => key(b) - key(a)).slice(0, n);
     setPoints("hexhl", rows.map(h => ({ type:"Feature", geometry:{ type:"Point", coordinates:[h.lon, h.lat] }, properties:{} })));
     if(rows.length){ const b = new maplibregl.LngLatBounds(); rows.forEach(h => b.extend([h.lon, h.lat])); map.fitBounds(b, { padding:80, maxZoom:12 }); }
-    return { lens, hazard, place:place || "county", hexes:rows.map(h => ({ lon:h.lon, lat:h.lat, place:h.pl, buildings:h.b,
+    return { lens, hazard, place:place || "city", hexes:rows.map(h => ({ lon:h.lon, lat:h.lat, place:h.pl, buildings:h.b,
       insurance_critical:h.ic, insurance_high:h.ih, cre_critical:h.cc, energy_critical:h.ec,
       avg_insurance:h.s_ins, avg_wildfire:h.wf, avg_flood:h.fl, avg_severe_weather:h.sw })) };
   },
@@ -371,12 +358,15 @@ const mapTools = {
   query_properties: async ({lon, lat, place, radius_m, metric = "insurance", limit = 10, place_label}) => {
     const c = CoRiskQuery.gazetteer.resolveCentre({lon, lat, place, place_label});
     if(!c.ok) return {error:c.error};
-    const eng = await loadQueryEngine();
-    const res = await CoRiskQuery.executor.run({ center:{lon:c.lon, lat:c.lat}, radius_m, metric, limit }, { engine:eng });
-    if(!res.ok) return {error:res.errors.join(" ")};
+    copThink(true, "Querying your Gold tables on Wherobots (the first query starts compute, about a minute)…");
+    const r = await fetch("/api/query", { method:"POST", headers:{"content-type":"application/json"},
+      body:JSON.stringify({ lon:c.lon, lat:c.lat, radius_m, metric, limit }) });
+    const res = await r.json().catch(() => ({ error:"query failed (HTTP " + r.status + ")" }));
+    if(res.error) return {error:res.error};
+    res.rows.forEach(row => row.place = nearestPlace(row.lon, row.lat));
     renderQueryResults(res, c.label);
-    return { matched:res.rows.length, radius_m:res.radius_m, metric:res.metric, data_version:res.version,
-      notices:res.notices, disclosure:res.disclosure, empty:res.empty,
+    return { matched:res.rows.length, radius_m:res.radius_m, metric:res.metric, clamps:res.clamps,
+      seconds:res.seconds, empty:!res.rows.length,
       rows:res.rows.map(r => ({ building_id:r.building_id, place:r.place, insurance:r.ins_score, insurance_tier:r.ins_tier,
         cre:r.cre_score, energy:r.en_score, capital_markets:r.cap_score, wildfire:r.wildfire_factor,
         flood:r.flood_factor, severe_weather:r.severe_weather_factor, dist_m:Math.round(r.dist_m) })) };
@@ -384,7 +374,7 @@ const mapTools = {
 };
 const TOOL_LABEL = { set_lens:i => "Switching to the " + i.lens + " lens", set_hazard:i => "Colouring by " + i.hazard,
   focus_place:i => "Flying to " + i.name, find_top_places:() => "Ranking places", find_hexes:() => "Finding hotspots",
-  query_properties:i => "Querying buildings" + (i.place ? " near " + i.place : ""), fit_county:() => "Zooming out",
+  query_properties:i => "Querying buildings" + (i.place ? " near " + i.place : ""), fit_city:() => "Zooming out",
   clear_highlights:() => "Clearing highlights", get_map_state:() => "Reading the map" };
 
 // ---------------------------------------------------------------- copilot loop (from the CO app)
@@ -422,8 +412,8 @@ async function copRun(){
 function copSend(){ const t = cop.text.value.trim(); if(!t) return; cop.text.value = ""; copBubble("user", t); copMsgs.push({ role:"user", content:t }); copRun(); }
 (function(){
   cop.panel = document.getElementById("copilot"); cop.list = document.getElementById("cop-msgs"); cop.text = document.getElementById("cop-text");
-  document.getElementById("copilot-fab").onclick = () => { cop.panel.style.display = "flex"; document.getElementById("copilot-fab").style.display = "none"; setTimeout(warmQueryEngine, 0);
-    if(!cop.list.children.length) copBubble("assistant", "Ask me about San Diego County risk — e.g. “which places have the most critical buildings for insurance?” or “top 10 wildfire-exposed buildings near Ramona”.");
+  document.getElementById("copilot-fab").onclick = () => { cop.panel.style.display = "flex"; document.getElementById("copilot-fab").style.display = "none";
+    if(!cop.list.children.length) copBubble("assistant", "Ask me about City of San Diego risk — e.g. “which places have the most critical buildings for insurance?” or “top 10 wildfire-exposed buildings near Scripps Ranch”.");
     cop.text.focus(); };
   document.getElementById("cop-x").onclick = () => { cop.panel.style.display = "none"; document.getElementById("copilot-fab").style.display = "inline-flex"; };
   document.getElementById("cop-send").onclick = copSend;
