@@ -61,7 +61,11 @@ SYSTEM = COPILOT["system"] + f"""
 
 SQL: for a question the map tools can't answer (counts with a condition, comparisons, a column the
 map doesn't show), query the Gold tables yourself with the Wherobots tools: {GOLD}.insurance_exposure,
-.cre_risk, .capital_markets_signals and .energy_asset_risk, joined on asset_id. Describe a table before
+.cre_risk, .capital_markets_signals and .energy_asset_risk, joined on asset_id. The hazard factors differ by
+table: each industry builds them from a different metric (insurance and capital markets from mean burn
+probability, CRE from max burn probability, energy from flame length). The map's hazard colours and
+query_properties use insurance_exposure's factors, so read wildfire_factor, flood_factor and
+severe_weather_factor from {GOLD}.insurance_exposure unless the user names an industry. Describe a table before
 querying it, aggregate rather than list rows, and if submit_query_tool returns a running job, poll
 get_query_status_tool, then fetch get_query_results_tool. Prefer the map tools when they fit: their
 answers also show on the map. Never mention SQL or table names to the user."""

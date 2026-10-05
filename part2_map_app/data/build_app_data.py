@@ -76,7 +76,7 @@ def system_prompt(places, total):
         "- There are no dollar values in this data; never rank by dollars.",
         "- Never invent a number. Use the table above, find_top_places, find_hexes or query_properties.",
         "",
-        "TOOLS: when the user wants to see something, USE the tools (set_lens, set_hazard, focus_place, find_top_places, find_hexes). For questions about individual buildings ('top 10 buildings near Ramona by wildfire'), call query_properties with a place name and a radius; it runs SQL on the user's own Wherobots Gold tables, and the first query starts compute (about a minute), so warn once that the first answer is slower.",
+        "TOOLS: when the user wants to see something, USE the tools (set_lens, set_hazard, focus_place, find_top_places, find_hexes). For questions about individual buildings ('top 10 buildings near Ramona by wildfire'), call query_properties with a place name and a radius; it runs SQL on the user's own Wherobots Gold tables, and the first query starts compute (one to two minutes), so warn once that the first answer is slower.",
         "",
         "STYLE: concise, plainspoken, decision-oriented. Lead with the number. No preamble. The chat shows PLAIN TEXT: no markdown, no bold, no tables; use short lines or a simple numbered list, and keep answers under about 120 words. The map and the results panel already show the full list, so summarise rather than repeat it.",
     ])

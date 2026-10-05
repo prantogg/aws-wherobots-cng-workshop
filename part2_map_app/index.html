@@ -358,7 +358,7 @@ const mapTools = {
   query_properties: async ({lon, lat, place, radius_m, metric = "insurance", limit = 10, place_label}) => {
     const c = CoRiskQuery.gazetteer.resolveCentre({lon, lat, place, place_label});
     if(!c.ok) return {error:c.error};
-    copThink(true, "Querying your Gold tables on Wherobots (the first query starts compute, about a minute)…");
+    copThink(true, "Querying your Gold tables on Wherobots (the first query starts compute, one to two minutes)…");
     const r = await fetch("/api/query", { method:"POST", headers:{"content-type":"application/json"},
       body:JSON.stringify({ lon:c.lon, lat:c.lat, radius_m, metric, limit }) });
     const res = await r.json().catch(() => ({ error:"query failed (HTTP " + r.status + ")" }));

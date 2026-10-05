@@ -427,7 +427,7 @@ Now a question about individual buildings, answered from **your** Gold tables:
 
 The agent calls `query_properties`, which runs a spatial query on Wherobots through the MCP and draws numbered markers with a results panel. Scores run from about 0.25 down to 0.08, and all ten are insurance-critical.
 
-> **The first question that queries Wherobots takes about a minute** while compute starts (the app starts it as soon as it launches). Later ones take 10–20 seconds. After about 5 idle minutes the next one starts compute again.
+> **The first question that queries Wherobots takes one to two minutes** while compute starts (the app starts it as soon as it launches). Later ones take 10–20 seconds. After about 5 idle minutes the next one starts compute again.
 
 Then a question no map tool covers:
 

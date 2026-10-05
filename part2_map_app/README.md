@@ -23,7 +23,7 @@ Try: *"Which neighbourhoods have the most critical buildings for insurance?"*, *
 wildfire hotspots around Tierrasanta"*, *"Top 10 buildings by wildfire within 2 miles of Scripps
 Ranch"*, *"How many buildings in La Jolla have a wildfire factor above 0.2?"* (no map tool
 answers that one, so the agent writes the SQL itself). The first question that queries Wherobots
-starts compute, so it takes about a minute; later ones take seconds.
+starts compute, so it takes one to two minutes; later ones take seconds.
 
 ## How it works
 
