@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>San Diego Building Risk</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<!-- Place names the copilot can use as a query centre. Building queries themselves run on the
+     participant's own Gold tables through the Wherobots MCP (/api/query in serve.py). -->
+<script src="query/gazetteer.js"></script>
+<style>
+  :root{--ink:#1d2433;--muted:#667085;--line:#e4e7ec;--accent:#3b5bdb;--panel:#fff;
+        --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  html,body{margin:0;height:100%;font-family:var(--font);color:var(--ink)}
+  #map{position:absolute;inset:0}
+  .panel{position:absolute;top:12px;left:12px;z-index:5;width:310px;max-height:calc(100vh - 24px);overflow:auto;
+         background:var(--panel);border-radius:12px;box-shadow:0 4px 18px rgba(16,24,40,.15);padding:14px 15px}
+  .panel h1{font-size:15px;margin:0 0 2px}
+  .sub{font-size:11.5px;color:var(--muted);margin-bottom:10px}
+  .lab{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:10px 0 5px}
+  .chips{display:flex;flex-wrap:wrap;gap:5px}
+  .chip{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:4px 10px;cursor:pointer}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .legend .row{display:flex;align-items:center;gap:7px;font-size:12px;margin:2px 0}
+  .sw{width:14px;height:12px;border-radius:2px;border:1px solid rgba(0,0,0,.08)}
+  .note{font-size:10.5px;color:var(--muted);margin-top:6px;line-height:1.4}
+  .places{font-size:12px}
+  .places .p{display:flex;justify-content:space-between;padding:3px 4px;border-radius:5px;cursor:pointer}
+  .places .p:hover{background:#f2f4f7}
+  .places .v{color:var(--muted);font-variant-numeric:tabular-nums}
+  .qpanel{position:absolute;top:12px;right:12px;z-index:5;width:300px;max-height:calc(100vh - 90px);overflow:auto;
+          background:var(--panel);border-radius:12px;box-shadow:0 4px 18px rgba(16,24,40,.15);padding:12px 13px;display:none;font-size:12px}
+  .qpanel h2{font-size:13px;margin:0 0 6px;display:flex;justify-content:space-between}
+  .qpanel .r{display:flex;justify-content:space-between;border-top:1px solid var(--line);padding:4px 0;cursor:pointer}
+  .copilot-fab{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:6;display:inline-flex;align-items:center;gap:6px;
+               background:var(--accent);color:#fff;border:0;border-radius:999px;padding:10px 18px;font-weight:700;font-size:13px;cursor:pointer;box-shadow:0 4px 14px rgba(59,91,219,.4)}
+  .copilot{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;z-index:7;width:390px;max-width:calc(100vw - 24px);height:470px;max-height:72vh;
+           background:#fff;border-radius:14px;box-shadow:0 8px 30px rgba(16,24,40,.25);display:none;flex-direction:column}
+  .cop-head{padding:10px 13px;font-weight:800;font-size:13px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  .cop-x{cursor:pointer;color:var(--muted);font-size:19px;line-height:1}
+  .cop-msgs{flex:1;overflow:auto;padding:11px 12px;display:flex;flex-direction:column;gap:8px}
+  .cop-b{font-size:12.5px;line-height:1.45;padding:8px 11px;border-radius:10px;max-width:88%;white-space:pre-wrap}
+  .cop-b.user{align-self:flex-end;background:var(--accent);color:#fff}
+  .cop-b.assistant{align-self:flex-start;background:#f1f4f9;color:var(--ink)}
+  .cop-b.thinking{opacity:.55}
+  .cop-input{display:flex;gap:6px;padding:9px;border-top:1px solid var(--line)}
+  .cop-input textarea{flex:1;resize:none;font-family:var(--font);font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:7px 9px;max-height:80px}
+  .cop-input button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:0 13px;font-weight:700;cursor:pointer}
+  .cop-note{font-size:10px;color:var(--muted);padding:0 12px 8px;text-align:center}
+  .maplibregl-popup-content{font-size:12px;line-height:1.45;padding:10px 12px;border-radius:9px}
+  .maplibregl-popup-content b{font-weight:700}
+  @media (max-width:700px){ .panel{width:calc(100vw - 24px);max-height:40vh} .qpanel{display:none!important} }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="panel">
+  <h1>City of San Diego building risk</h1>
+  <div class="sub" id="sub">Loading…</div>
+  <div class="lab">Industry lens</div>
+  <div class="chips" id="lenses"></div>
+  <div class="lab">Colour by</div>
+  <div class="chips" id="hazards"></div>
+  <div class="chips" style="margin-top:6px"><span class="chip" id="hex-toggle">Hexagons</span></div>
+  <div class="lab" id="legend-title">Legend</div>
+  <div class="legend" id="legend"></div>
+  <div class="note" id="legend-note"></div>
+  <div class="lab" id="places-title">Places</div>
+  <div class="places" id="places"></div>
+  <div class="note">Risk tiers are percentile ranks within the city, not insurability determinations.
+    Data: Overture Maps (buildings, places), USFS, NASA OPERA, NOAA SWDI, scored with Wherobots.
+    App by Ben Pruden, adapted for the CNG workshop.</div>
+</div>
+
+<div class="qpanel" id="qpanel"></div>
+
+<button class="copilot-fab" id="copilot-fab">💬 Ask the map</button>
+<div class="copilot" id="copilot">
+  <div class="cop-head"><span>Risk copilot</span><span class="cop-x" id="cop-x">×</span></div>
+  <div class="cop-msgs" id="cop-msgs"></div>
+  <div class="cop-input"><textarea id="cop-text" rows="2" placeholder="Ask about places, hazards or buildings…"></textarea><button id="cop-send">Send</button></div>
+  <div class="cop-note">Answers use this map's data only. Building questions run SQL on your Wherobots Gold tables.</div>
+</div>
+
+<script>
+// ---------------------------------------------------------------- data locations
+const DATA_VERSION = "20261004";   // set by data/build_app_data.py
+const BUCKET = "https://wherobots-cng-workshop-sd-uw2.s3.us-west-2.amazonaws.com/sd/";
+const TILES = BUCKET + "v" + DATA_VERSION + "/tiles/";
+
+// ---------------------------------------------------------------- lenses and hazards
+const LENSES = {
+  insurance:       { label:"Insurance",       pt:"ins_t", ps:"ins_s", tier:"ins_tier", score:"ins_score", hex:"avg_ins_score", hj:"s_ins", crit:"ins_critical", hjc:"ic" },
+  cre:             { label:"CRE",             pt:"cre_t", ps:"cre_s", tier:"cre_tier", score:"cre_score", hex:"avg_cre_score", hj:"s_cre", crit:"cre_critical", hjc:"cc" },
+  capital_markets: { label:"Capital markets", pt:null,    ps:"cap_s", tier:null,       score:"cap_score", hex:"avg_cap_score", hj:"s_cap", crit:null,           hjc:null },
+  energy:          { label:"Energy",          pt:"en_t",  ps:"en_s",  tier:"en_tier",  score:"en_score",  hex:"avg_en_score",  hj:"s_en",  crit:"en_critical",  hjc:"ec" }
+};
+const HAZARDS = {
+  risk:           { label:"Risk score" },
+  wildfire:       { label:"Wildfire",       pf:"wf", bld:"wildfire_factor",       hex:"avg_wildfire",       hj:"wf", ramp:["#fff5eb","#fdae6b","#e6550d","#7f2704"] },
+  flood:          { label:"Flood",          pf:"fl", bld:"flood_factor",          hex:"avg_flood",          hj:"fl", ramp:["#f7fbff","#9ecae1","#3182bd","#08306b"] },
+  severe_weather: { label:"Severe weather", pf:"sw", bld:"severe_weather_factor", hex:"avg_severe_weather", hj:"sw", ramp:["#fcfbfd","#bcbddc","#807dba","#3f007d"] }
+};
+// Orange/magenta rather than red/green, so tiers stay distinguishable with colour-vision deficiency.
+const TIERS = [["critical","#7a0177"],["high","#f16913"],["elevated","#fdd0a2"],["moderate","#c6dbef"],["low","#f2f2f2"]];
+const SCORE_RAMP = ["#f7f4f9","#d4b9da","#df65b0","#7a0177"];
+const state = { lens:"insurance", hazard:"risk", hexes:false };
+
+let HEXES = [], PLACES = [], TOTAL = 0;
+
+// ---------------------------------------------------------------- helpers
+const fmt = n => (+n).toLocaleString("en-US");
+const pct = x => (100*x).toFixed(x >= 0.995 || x === 0 ? 0 : 1) + "%";
+const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function quantiles(vals, qs){ const s = vals.filter(v => v != null && isFinite(v)).sort((a,b)=>a-b);
+  return qs.map(q => s.length ? s[Math.min(s.length-1, Math.floor(q*(s.length-1)))] : 0); }
+function stopsFor(vals, ramp){
+  // Stops from the data's real spread (p10, p50, p90, p99), kept strictly increasing for MapLibre.
+  let q = quantiles(vals, [0.1, 0.5, 0.9, 0.99]);
+  for(let i=1;i<q.length;i++) if(q[i] <= q[i-1]) q[i] = q[i-1] + 1e-6;
+  return q.map((v,i) => [v, ramp[i]]);
+}
+function interp(field, stops){ return ["interpolate",["linear"],["coalesce",["get",field],0], ...stops.flat()]; }
+function tierMatch(field){ return ["match",["get",field], ...TIERS.flat(), "#cccccc"]; }
+
+// ---------------------------------------------------------------- map
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", protocol.tile);
+const map = new maplibregl.Map({
+  container:"map", style:"https://tiles.openfreemap.org/styles/positron",
+  center:[-117.13, 32.83], zoom:10, attributionControl:{compact:true}
+});
+map.addControl(new maplibregl.NavigationControl({showCompass:false}), "bottom-right");
+
+function currentColor(kind){   // kind: "hex" | "bld"
+  const L = LENSES[state.lens], H = HAZARDS[state.hazard];
+  if(state.hazard === "risk"){
+    if(kind === "bld" && L.tier) return tierMatch(L.tier);
+    return interp(kind === "hex" ? L.hex : L.score, stopsFor(HEXES.map(h => h[L.hj]), SCORE_RAMP));
+  }
+  return interp(kind === "hex" ? H.hex : H.bld, stopsFor(HEXES.map(h => h[H.hj]), H.ramp));
+}
+const TIER_INT = ["low","moderate","elevated","high","critical"];
+function pointColor(){
+  const L = LENSES[state.lens], H = HAZARDS[state.hazard];
+  if(state.hazard === "risk" && L.pt)
+    return ["match",["get",L.pt], ...TIERS.flatMap(([t,c]) => [TIER_INT.indexOf(t), c]), "#cccccc"];
+  const field = state.hazard === "risk" ? L.ps : H.pf, hj = state.hazard === "risk" ? L.hj : H.hj;
+  const stops = stopsFor(HEXES.map(h => h[hj]), state.hazard === "risk" ? SCORE_RAMP : H.ramp).map(([v,c]) => [v*100, c]);
+  for(let i=1;i<stops.length;i++) if(stops[i][0] <= stops[i-1][0]) stops[i][0] = stops[i-1][0] + 1e-4;
+  return interp(field, stops);
+}
+function pointSortKey(){   // higher risk draws on top, so it is never buried under low-risk neighbours
+  const L = LENSES[state.lens], H = HAZARDS[state.hazard];
+  return ["coalesce", ["get", state.hazard === "risk" ? (L.pt || L.ps) : H.pf], 0];
+}
+function applyHexVisibility(){
+  if(!map.getLayer("hex-fill")) return;
+  // Hexagons always cover the wide view below zoom 9 (where the dots start); above it they are opt-in.
+  map.setLayerZoomRange("hex-fill", 0, state.hexes ? 15 : 9);
+}
+function applyStyle(){
+  if(!map.getLayer("hex-fill")) return;
+  map.setPaintProperty("hex-fill", "fill-color", currentColor("hex"));
+  map.setPaintProperty("bld-fill", "fill-color", currentColor("bld"));
+  map.setPaintProperty("pts-c", "circle-color", pointColor());
+  map.setLayoutProperty("pts-c", "circle-sort-key", pointSortKey());
+  applyHexVisibility();
+  renderLegend(); renderPlaces();
+}
+
+// The place and hex tables load with the page, not with the map: the copilot's tools only need
+// these, and MapLibre's load can wait a long time on a slow basemap.
+const DATA_READY = Promise.all([fetch("hexes.json").then(r => r.json()), fetch("places.json").then(r => r.json())])
+  .then(([h, p]) => { HEXES = h; PLACES = p.places; TOTAL = p.total_buildings;
+    document.getElementById("sub").textContent =
+      fmt(TOTAL) + " buildings · " + PLACES.length + " places · scored for wildfire, flood and severe weather";
+    buildChips(); renderLegend(); renderPlaces(); });
+
+function setPoints(sourceId, features){   // highlight helper: a no-op until the layers exist
+  const s = map.getSource(sourceId);
+  if(s) s.setData({ type:"FeatureCollection", features });
+}
+
+let layersAdded = false;
+async function addAppLayers(){
+  if(layersAdded) return;
+  layersAdded = true;
+  await DATA_READY;
+  map.addSource("hex", { type:"vector", url:"pmtiles://" + TILES + "sd_hex.pmtiles" });
+  map.addSource("bld", { type:"vector", url:"pmtiles://" + TILES + "sd_buildings.pmtiles" });
+  map.addSource("pts", { type:"vector", url:"pmtiles://" + TILES + "sd_points.pmtiles" });
+  map.addSource("plc", { type:"vector", url:"pmtiles://" + TILES + "sd_places.pmtiles" });
+  map.addSource("hexhl", { type:"geojson", data:{type:"FeatureCollection", features:[]} });
+  map.addSource("qres",  { type:"geojson", data:{type:"FeatureCollection", features:[]} });
+  map.addLayer({ id:"hex-fill", type:"fill", source:"hex", "source-layer":"hex", maxzoom:15,
+    paint:{ "fill-color":"#ccc", "fill-opacity":["interpolate",["linear"],["zoom"], 8,0.75, 9,0.45, 13,0.3, 14,0] } });
+  map.addLayer({ id:"pts-c", type:"circle", source:"pts", "source-layer":"points", minzoom:9, maxzoom:13,
+    paint:{ "circle-color":"#ccc", "circle-stroke-width":0,
+            "circle-radius":["interpolate",["linear"],["zoom"], 9,0.9, 10.5,1.4, 12,2.4, 13,3.2],
+            "circle-opacity":["interpolate",["linear"],["zoom"], 9,0.9, 12,0.9, 12.8,0] } });
+  map.addLayer({ id:"bld-fill", type:"fill", source:"bld", "source-layer":"buildings", minzoom:12,
+    paint:{ "fill-color":"#ccc", "fill-opacity":["interpolate",["linear"],["zoom"], 12,0, 12.8,0.9],
+            "fill-outline-color":"rgba(0,0,0,.25)" } });
+  map.addLayer({ id:"plc-line", type:"line", source:"plc", "source-layer":"places",
+    paint:{ "line-color":"#344054", "line-width":["interpolate",["linear"],["zoom"], 8,0.6, 13,1.6], "line-opacity":0.55 } });
+  map.addLayer({ id:"hexhl-c", type:"circle", source:"hexhl",
+    paint:{ "circle-radius":9, "circle-color":"rgba(0,0,0,0)", "circle-stroke-width":2.5, "circle-stroke-color":"#111" } });
+  map.addLayer({ id:"qres-c", type:"circle", source:"qres",
+    paint:{ "circle-radius":7, "circle-color":"#3b5bdb", "circle-stroke-width":2, "circle-stroke-color":"#fff" } });
+  map.addLayer({ id:"qres-n", type:"symbol", source:"qres",
+    layout:{ "text-field":["get","rank"], "text-size":10, "text-font":["Noto Sans Bold"] }, paint:{ "text-color":"#fff" } });
+  applyStyle(); wireInteractions();
+}
+map.on("style.load", addAppLayers);
+map.on("load", addAppLayers);
+
+// ---------------------------------------------------------------- panel
+function buildChips(){
+  const mk = (el, obj, key) => { el.innerHTML = "";
+    Object.entries(obj).forEach(([k, v]) => { const b = document.createElement("span");
+      b.className = "chip" + (state[key] === k ? " on" : ""); b.textContent = v.label;
+      b.onclick = () => { state[key] = k; buildChips(); applyStyle(); }; el.appendChild(b); }); };
+  mk(document.getElementById("lenses"), LENSES, "lens");
+  mk(document.getElementById("hazards"), HAZARDS, "hazard");
+  const hx = document.getElementById("hex-toggle");
+  hx.className = "chip" + (state.hexes ? " on" : "");
+  hx.onclick = () => { state.hexes = !state.hexes; buildChips(); applyHexVisibility(); };
+}
+function renderLegend(){
+  const L = LENSES[state.lens], H = HAZARDS[state.hazard], el = document.getElementById("legend");
+  const title = document.getElementById("legend-title"), note = document.getElementById("legend-note");
+  if(state.hazard === "risk"){
+    title.textContent = L.label + " risk";
+    const tiers = L.tier ? TIERS.map(([t,c]) => `<div class="row"><span class="sw" style="background:${c}"></span>${t}</div>`).join("") : "";
+    const ramp = stopsFor(HEXES.map(h => h[L.hj]), SCORE_RAMP);
+    el.innerHTML = (L.tier ? "<div style='font-size:11px;color:var(--muted)'>Buildings</div>" + tiers : "") +
+      "<div style='font-size:11px;color:var(--muted);margin-top:4px'>Hexagons: mean score</div>" +
+      ramp.map(([v,c]) => `<div class="row"><span class="sw" style="background:${c}"></span>${v.toFixed(3)}</div>`).join("");
+    note.textContent = L.tier ? "Tiers are percentiles: top 5% critical, next 15% high." : "Capital markets has no tier; colour is the score.";
+  } else {
+    title.textContent = H.label + " factor";
+    el.innerHTML = stopsFor(HEXES.map(h => h[H.hj]), H.ramp)
+      .map(([v,c]) => `<div class="row"><span class="sw" style="background:${c}"></span>${v.toFixed(3)}</div>`).join("");
+    note.textContent = state.hazard === "flood" ? "Flood is satellite-observed water, Dec 2025 – Mar 2026: zero almost everywhere." : "Normalised 0–1 within the city.";
+  }
+}
+function placeMetric(p){
+  const L = LENSES[state.lens];
+  if(state.hazard !== "risk")   // mean factor, so big cities don't top the list just by size
+    return { v:p["avg_" + state.hazard], label:"mean " + HAZARDS[state.hazard].label.toLowerCase() + " factor", score:true };
+  if(L.crit) return { v:p[L.crit], label:"critical buildings" };
+  return { v:p.avg_cap_score, label:"mean score", score:true };
+}
+function renderPlaces(){
+  const rows = PLACES.slice().sort((a,b) => placeMetric(b).v - placeMetric(a).v).slice(0, 10);
+  document.getElementById("places-title").textContent = "Top places — " + placeMetric(rows[0] || {}).label;
+  document.getElementById("places").innerHTML = rows.map(p => { const m = placeMetric(p);
+    return `<div class="p" data-n="${esc(p.place)}"><span>${esc(p.place)}</span><span class="v">${m.score ? (+m.v).toFixed(3) : fmt(m.v)}</span></div>`; }).join("");
+  document.querySelectorAll("#places .p").forEach(el => el.onclick = () => mapTools.focus_place({ name: el.dataset.n }));
+}
+
+// ---------------------------------------------------------------- popups
+const row = (k, v) => `${k}: <b>${v}</b><br>`;
+function wireInteractions(){
+  map.on("click", e => {
+    const f = map.queryRenderedFeatures(e.point, { layers:["qres-c","bld-fill","pts-c","hex-fill"].filter(id => map.getLayer(id)) })[0];
+    if(!f) return;
+    const p = f.properties; let html;
+    if(f.layer.id === "qres-c") html = `<b>#${p.rank}</b> ${esc(p.place)}<br>` + row("Score", (+p.score).toFixed(3)) + row("Distance", fmt(Math.round(p.dist_m)) + " m");
+    else if(f.layer.id === "bld-fill") html = `<b>${esc(p.place)}</b><br>` +
+      row("Insurance", `${p.ins_tier} (${p.ins_score})`) + row("CRE", `${p.cre_tier} (${p.cre_score})`) +
+      row("Energy", `${p.en_tier} (${p.en_score})`) + row("Capital markets", p.cap_score) +
+      row("Wildfire / flood / severe weather", `${p.wildfire_factor} / ${p.flood_factor} / ${p.severe_weather_factor}`);
+    else if(f.layer.id === "pts-c") html = "<b>Building</b> (zoom in for its outline)<br>" +
+      row("Insurance", `${TIER_INT[p.ins_t]} (${(p.ins_s/100).toFixed(2)})`) + row("CRE", `${TIER_INT[p.cre_t]} (${(p.cre_s/100).toFixed(2)})`) +
+      row("Energy", `${TIER_INT[p.en_t]} (${(p.en_s/100).toFixed(2)})`) + row("Capital markets", (p.cap_s/100).toFixed(2)) +
+      row("Wildfire / flood / severe weather", `${(p.wf/100).toFixed(2)} / ${(p.fl/100).toFixed(2)} / ${(p.sw/100).toFixed(2)}`);
+    else html = `<b>${esc(p.place)}</b> (hexagon)<br>` + row("Buildings", fmt(p.buildings)) +
+      row("Critical (insurance / CRE / energy)", `${fmt(p.ins_critical)} / ${fmt(p.cre_critical)} / ${fmt(p.en_critical)}`) +
+      row("Mean wildfire", (+p.avg_wildfire).toFixed(3));
+    new maplibregl.Popup({ maxWidth:"300px" }).setLngLat(e.lngLat).setHTML(html).addTo(map);
+  });
+  for(const id of ["hex-fill","bld-fill","pts-c","qres-c"]){
+    map.on("mouseenter", id, () => map.getCanvas().style.cursor = "pointer");
+    map.on("mouseleave", id, () => map.getCanvas().style.cursor = "");
+  }
+}
+
+// ---------------------------------------------------------------- query results
+const METRIC_COLUMNS = { insurance:"ins_score", cre:"cre_score", capital_markets:"cap_score", energy:"en_score",
+  wildfire:"wildfire_factor", flood:"flood_factor", severe_weather:"severe_weather_factor", outage_probability:"outage_probability" };
+function nearestPlace(lon, lat){
+  let best = null, bd = Infinity;
+  for(const p of PLACES){ const d = (p.lon - lon) ** 2 + (p.lat - lat) ** 2; if(d < bd){ bd = d; best = p; } }
+  return best ? best.place : "";
+}
+function renderQueryResults(res, label){
+  const metricKey = res.metric, col = METRIC_COLUMNS[metricKey];
+  const feats = res.rows.map((r, i) => ({ type:"Feature", geometry:{ type:"Point", coordinates:[r.lon, r.lat] },
+    properties:{ rank:i+1, place:r.place, score:r[col], dist_m:r.dist_m } }));
+  setPoints("qres", feats);
+  const qp = document.getElementById("qpanel");
+  qp.innerHTML = `<h2><span>Top ${res.rows.length} by ${esc(metricKey)}${label ? " · " + esc(label) : ""}</span><span class="cop-x" id="q-x">×</span></h2>` +
+    `<div class="note">Within ${fmt(Math.round(res.radius_m))} m · your Gold tables via the Wherobots MCP · ${res.seconds} s</div>` +
+    res.rows.map((r, i) => `<div class="r" data-i="${i}"><span>#${i+1} ${esc(r.place)}</span><span>${(+r[col]).toFixed(3)}</span></div>`).join("");
+  qp.style.display = res.rows.length ? "block" : "none";
+  document.getElementById("q-x").onclick = () => { qp.style.display = "none"; setPoints("qres", []); };
+  qp.querySelectorAll(".r").forEach(el => el.onclick = () => { const r = res.rows[+el.dataset.i]; map.flyTo({ center:[r.lon, r.lat], zoom:16 }); });
+  if(feats.length){ const b = new maplibregl.LngLatBounds(); feats.forEach(f => b.extend(f.geometry.coordinates)); map.fitBounds(b, { padding:90, maxZoom:15 }); }
+}
+
+// ---------------------------------------------------------------- copilot tools (run in the browser)
+function findPlace(name){
+  const n = String(name || "").toLowerCase().trim();
+  return PLACES.find(p => p.place.toLowerCase() === n) || PLACES.find(p => p.place.toLowerCase().includes(n));
+}
+function placeSummary(p){ return { place:p.place, type:p.type, buildings:p.buildings,
+  insurance_critical:p.ins_critical, insurance_high:p.ins_high, cre_critical:p.cre_critical, energy_critical:p.en_critical,
+  share_insurance_critical:+(p.ins_critical / p.buildings).toFixed(4), wildfire_exposed:p.wildfire_exposed,
+  avg_insurance_score:p.avg_ins_score, avg_wildfire:p.avg_wildfire, avg_flood:p.avg_flood, avg_severe_weather:p.avg_severe_weather }; }
+const mapTools = {
+  set_lens: ({lens}) => { if(!LENSES[lens]) return {error:"unknown lens " + lens}; state.lens = lens; buildChips(); applyStyle(); return {ok:true, lens}; },
+  set_hazard: ({hazard}) => { if(!HAZARDS[hazard]) return {error:"unknown hazard " + hazard}; state.hazard = hazard; buildChips(); applyStyle(); return {ok:true, hazard}; },
+  get_map_state: () => ({ lens:state.lens, hazard:state.hazard, zoom:+map.getZoom().toFixed(1),
+    center:map.getCenter().toArray().map(v => +v.toFixed(4)) }),
+  fit_city: () => { map.flyTo({ center:[-117.13, 32.83], zoom:10 }); return {ok:true}; },
+  focus_place: ({name}) => { const p = findPlace(name); if(!p) return {error:"unknown place: " + name};
+    map.fitBounds([[p.xmin, p.ymin], [p.xmax, p.ymax]], { padding:60, maxZoom:14 }); return placeSummary(p); },
+  find_top_places: ({lens = state.lens, by = "critical", n = 10}) => {
+    const L = LENSES[lens] || LENSES.insurance; n = Math.max(1, Math.min(25, n | 0 || 10));
+    let rows = PLACES.slice();
+    const key = p => by === "wildfire_exposed" ? p.wildfire_exposed
+      : by === "share" ? (L.crit ? p[L.crit] / p.buildings : 0)
+      : by === "avg_score" ? p["avg_" + (lens === "capital_markets" ? "cap" : lens === "energy" ? "en" : lens === "cre" ? "cre" : "ins") + "_score"]
+      : (L.crit ? p[L.crit] : p.avg_cap_score);
+    if(by === "share") rows = rows.filter(p => p.buildings >= 500);
+    rows = rows.sort((a,b) => key(b) - key(a)).slice(0, n);
+    setPoints("hexhl", rows.map(p => ({ type:"Feature", geometry:{ type:"Point", coordinates:[p.lon, p.lat] }, properties:{} })));
+    return { lens, by, places:rows.map(placeSummary), note: by === "share" ? "share ranking skips places under 500 buildings" : undefined };
+  },
+  find_hexes: ({lens = state.lens, hazard = "risk", place, n = 10}) => {
+    const L = LENSES[lens] || LENSES.insurance; n = Math.max(1, Math.min(25, n | 0 || 10));
+    let rows = HEXES.filter(h => !place || (h.pl || "").toLowerCase() === String(place).toLowerCase());
+    const key = hazard === "risk" ? (L.hjc ? (h => h[L.hjc]) : (h => h[L.hj])) : (h => h[HAZARDS[hazard].hj]);
+    rows = rows.sort((a,b) => key(b) - key(a)).slice(0, n);
+    setPoints("hexhl", rows.map(h => ({ type:"Feature", geometry:{ type:"Point", coordinates:[h.lon, h.lat] }, properties:{} })));
+    if(rows.length){ const b = new maplibregl.LngLatBounds(); rows.forEach(h => b.extend([h.lon, h.lat])); map.fitBounds(b, { padding:80, maxZoom:12 }); }
+    return { lens, hazard, place:place || "city", hexes:rows.map(h => ({ lon:h.lon, lat:h.lat, place:h.pl, buildings:h.b,
+      insurance_critical:h.ic, insurance_high:h.ih, cre_critical:h.cc, energy_critical:h.ec,
+      avg_insurance:h.s_ins, avg_wildfire:h.wf, avg_flood:h.fl, avg_severe_weather:h.sw })) };
+  },
+  clear_highlights: () => { setPoints("hexhl", []);
+    setPoints("qres", []); document.getElementById("qpanel").style.display = "none"; return {ok:true}; },
+  query_properties: async ({lon, lat, place, radius_m, metric = "insurance", limit = 10, place_label}) => {
+    const c = CoRiskQuery.gazetteer.resolveCentre({lon, lat, place, place_label});
+    if(!c.ok) return {error:c.error};
+    copThink(true, "Querying your Gold tables on Wherobots (the first query starts compute, one to two minutes)…");
+    const r = await fetch("/api/query", { method:"POST", headers:{"content-type":"application/json"},
+      body:JSON.stringify({ lon:c.lon, lat:c.lat, radius_m, metric, limit }) });
+    const res = await r.json().catch(() => ({ error:"query failed (HTTP " + r.status + ")" }));
+    if(res.error) return {error:res.error};
+    res.rows.forEach(row => row.place = nearestPlace(row.lon, row.lat));
+    renderQueryResults(res, c.label);
+    return { matched:res.rows.length, radius_m:res.radius_m, metric:res.metric, clamps:res.clamps,
+      seconds:res.seconds, empty:!res.rows.length,
+      rows:res.rows.map(r => ({ building_id:r.building_id, place:r.place, insurance:r.ins_score, insurance_tier:r.ins_tier,
+        cre:r.cre_score, energy:r.en_score, capital_markets:r.cap_score, wildfire:r.wildfire_factor,
+        flood:r.flood_factor, severe_weather:r.severe_weather_factor, dist_m:Math.round(r.dist_m) })) };
+  }
+};
+const TOOL_LABEL = { set_lens:i => "Switching to the " + i.lens + " lens", set_hazard:i => "Colouring by " + i.hazard,
+  focus_place:i => "Flying to " + i.name, find_top_places:() => "Ranking places", find_hexes:() => "Finding hotspots",
+  query_properties:i => "Querying buildings" + (i.place ? " near " + i.place : ""), fit_city:() => "Zooming out",
+  clear_highlights:() => "Clearing highlights", get_map_state:() => "Reading the map" };
+
+// ---------------------------------------------------------------- copilot loop
+// The agent runs on the server (Strands on Bedrock in serve.py). When it calls a map tool it
+// pauses and returns tool_calls; the browser runs them against the map and posts the results back.
+// `state` is only used by the Vercel api/chat.js, which keeps the conversation in the browser.
+const cop = {}; let copThinkEl = null, copState = null;
+const copSession = Math.random().toString(36).slice(2) + Date.now().toString(36);
+function copBubble(role, text){ const d = document.createElement("div"); d.className = "cop-b " + role; d.textContent = text; cop.list.appendChild(d); cop.list.scrollTop = cop.list.scrollHeight; return d; }
+function copThink(on, text){ if(on){ if(!copThinkEl){ copThinkEl = copBubble("assistant", text || "Thinking…"); copThinkEl.classList.add("thinking"); } else copThinkEl.textContent = text || "Thinking…"; }
+  else if(copThinkEl){ copThinkEl.remove(); copThinkEl = null; } }
+async function copRun(message){
+  let body = { message };
+  for(let round = 0; round < 12; round++){
+    copThink(true, "Thinking…");
+    let data;
+    try{
+      const r = await fetch("/api/chat", { method:"POST", headers:{"content-type":"application/json"},
+        body:JSON.stringify({ session:copSession, state:copState, ...body }) });
+      data = await r.json();
+      if(!r.ok){ copThink(false); copBubble("assistant", "⚠ " + (data && data.error ? data.error : "error " + r.status)); return; }
+    }catch(e){ copThink(false); copBubble("assistant", "⚠ Couldn't reach the copilot. Is serve.py running?"); return; }
+    copState = data.state || null;
+    const calls = data.tool_calls || [];
+    if(!calls.length){ copThink(false); copBubble("assistant", data.text || "(done)"); return; }
+    if(data.text){ copThink(false); copBubble("assistant", data.text); }
+    copThink(true, calls.map(c => TOOL_LABEL[c.name] ? TOOL_LABEL[c.name](c.input || {}) : c.name).join(" · ") + "…");
+    await DATA_READY;
+    const results = await Promise.all(calls.map(async c => { let out;
+      try{ out = mapTools[c.name] ? await mapTools[c.name](c.input || {}) : {error:"unknown tool " + c.name}; }
+      catch(e){ out = {error:String(e && e.message || e)}; }
+      return { id:c.id, output:out }; }));
+    body = { results };
+  }
+  copThink(false);
+}
+function copSend(){ const t = cop.text.value.trim(); if(!t) return; cop.text.value = ""; copBubble("user", t); copRun(t); }
+(function(){
+  cop.panel = document.getElementById("copilot"); cop.list = document.getElementById("cop-msgs"); cop.text = document.getElementById("cop-text");
+  document.getElementById("copilot-fab").onclick = () => { cop.panel.style.display = "flex"; document.getElementById("copilot-fab").style.display = "none";
+    if(!cop.list.children.length) copBubble("assistant", "Ask me about City of San Diego risk — e.g. “which places have the most critical buildings for insurance?” or “top 10 wildfire-exposed buildings near Scripps Ranch”.");
+    cop.text.focus(); };
+  document.getElementById("cop-x").onclick = () => { cop.panel.style.display = "none"; document.getElementById("copilot-fab").style.display = "inline-flex"; };
+  document.getElementById("cop-send").onclick = copSend;
+  cop.text.addEventListener("keydown", e => { if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); copSend(); } });
+})();
+</script>
+</body>
+</html>

@@ -4,7 +4,7 @@
 >
 > **Part 1 — Data Engineering:** Developer + [Wherobots MCP](https://api.cloud.wherobots.com/mcp/) → Medallion pipeline (Bronze → Silver → Gold) → Gold Iceberg tables in `org_catalog.gold`
 >
-> **Part 2 — Map Agent:** [Strands Agent](https://github.com/strands-agents/sdk-python) (Bedrock Claude) + Wherobots MCP + [MapLibre GL JS](https://maplibre.org/) → Interactive maps from natural language
+> **Part 2 — Map + Agent:** [MapLibre GL JS](https://maplibre.org/) map of every building + a [Strands Agent](https://github.com/strands-agents/sdk-python) (Bedrock Claude) that drives it and queries the Gold tables through the Wherobots MCP
 >
 > **Target Industries**: Insurance, Commercial Real Estate, Capital Markets, Energy & Utilities
 
@@ -43,26 +43,18 @@ The system has two parts — one for data engineering, one for end-user explorat
                    between the two parts      │
                                               │
 ╔═════════════════════════════════════════════╪═══════════════════════════╗
-║  PART 2 — END-USER MAP AGENT                │                           ║
+║  PART 2 — MAP + STRANDS AGENT               │                           ║
 ║  Persona: Analyst / business user asking questions                     ║
 ║                                             │                           ║
-║  ┌─────────────────┐     ┌──────────────────┴───────────┐              ║
-║  │ User prompt:     │     │ Strands Agent                │              ║
-║  │ "Show buildings  │────▶│ (Amazon Bedrock Claude)      │              ║
-║  │  with high       │     │                              │              ║
-║  │  wildfire risk   │     │ Tools: Wherobots MCP (SQL),  │              ║
-║  │  near Poway"     │     │   write_layer, publish_map   │              ║
-║  └─────────────────┘     │ Skill: open-mapping          │              ║
-║                           └──────────┬───────────────────┘              ║
-║                                      │ GeoJSON layers + map.json        ║
-║                                      ▼  (MapLibre style)                ║
-║                           ┌──────────────────────┐                      ║
-║                           │ MapLibre viewer       │                      ║
-║                           │ http://localhost:8765 │                      ║
-║                           │ - OpenFreeMap basemap │                      ║
-║                           │ - Updates after every │                      ║
-║                           │   answer              │                      ║
-║                           └──────────────────────┘                      ║
+║  ┌──────────────────────┐   ┌───────────────┴──────────────┐           ║
+║  │ Browser              │   │ Strands Agent (serve.py)     │           ║
+║  │ MapLibre map + chat  │◀─▶│ Amazon Bedrock Claude        │           ║
+║  │ "Top 10 buildings by │   │ Tools: 9 map tools (run in   │           ║
+║  │  wildfire near       │   │   the browser) + Wherobots   │           ║
+║  │  Tierrasanta"        │   │   MCP (SQL on gold)          │           ║
+║  └──────────▲───────────┘   └──────────────────────────────┘           ║
+║             │ map tiles of every building (PMTiles, pre-built,          ║
+║             │ public bucket) + OpenFreeMap basemap                      ║
 ╚═════════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -71,10 +63,10 @@ The system has two parts — one for data engineering, one for end-user explorat
 | | Part 1: Data Engineering | Part 2: Map Agent |
 |---|---|---|
 | **Persona** | Data engineer in an IDE | Analyst asking questions |
-| **Interface** | Claude Code / Kiro + Wherobots MCP | Strands Agent CLI + MapLibre viewer in the browser |
-| **Intelligence** | MCP-guided notebook generation | Skills + map tools (`write_layer`, `publish_map`) |
+| **Interface** | Claude Code / Kiro + Wherobots MCP | A MapLibre map with a chat panel, in the browser |
+| **Intelligence** | MCP-guided notebook generation | Strands agent with map tools and the Wherobots MCP |
 | **Runs when** | Pipeline build time (once or on schedule) | Ad-hoc, interactive, on demand |
-| **Output** | Scored Iceberg tables in `org_catalog.gold` | Interactive MapLibre maps (GeoJSON + style) |
+| **Output** | Scored Iceberg tables in `org_catalog.gold` | Answers on the map: rankings, hotspots, numbered buildings |
 | **MCP servers** | Wherobots | Wherobots |
 
 ---
@@ -152,15 +144,13 @@ Gold tables are Apache Iceberg tables in the participant's Wherobots catalog:
 
 ## How the End-User Agent Works (Part 2)
 
-The Strands map agent combines **the Wherobots MCP + two map tools + one skill**:
+`part2_map_app/serve.py` runs a Strands agent on Bedrock, one per open page, with two kinds of tools:
 
-1. **Wherobots MCP** — the same server as Part 1; the agent explores tables and tests SQL against `org_catalog.gold`
-2. **`write_layer`** runs the final query (through the MCP, results capped at 10,000 rows), saves it as GeoJSON, and returns column ranges and categories so the agent can choose colour stops from the real data
-3. **`publish_map`** writes a map spec — MapLibre sources and layers, legend, popup fields — and points `maps/current.json` at it
-4. The **viewer** (`viewer/index.html`, MapLibre GL JS + OpenFreeMap basemap) polls `current.json` and swaps in each new map; `?map=` permalinks open a fixed map
-5. The **`open-mapping` skill** teaches the spec format, data-driven styling expressions (`match`, `interpolate`, zoom ramps) and the tier palette
+1. **Map tools** (`copilot.json`: `set_lens`, `set_hazard`, `focus_place`, `fit_city`, `find_top_places`, `find_hexes`, `clear_highlights`, `get_map_state`, `query_properties`) change the map, so the browser runs them. When the agent calls one it pauses on a Strands interrupt; the page runs the tool and posts the result, and the agent resumes.
+2. **`query_properties`** answers building-level questions: it takes a place, a radius, a metric and a limit, and `/api/query` fills a fixed SQL template over the four Gold tables and runs it through the Wherobots MCP. The model never writes this SQL.
+3. **Wherobots MCP tools** (list and describe tables, read-only SQL) run in `serve.py`, for questions no map tool covers.
 
-Answers too large to draw building by building are aggregated in SQL first (for example H3 hexagons with `ST_H3CellIDs`), so the viewer only ever renders what fits in the browser.
+The map itself does not query Wherobots: every building is drawn from PMTiles built ahead of time by the same pipeline and served from a public bucket (dots below zoom 12, footprints above). Rankings and hotspots read small JSON summaries shipped with the page.
 
 ---
 
@@ -168,11 +158,11 @@ Answers too large to draw building by building are aggregated in SQL first (for 
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Two-layer architecture | Wherobots MCP (data eng) + Strands map agent (maps) | Clean separation: data engineer builds pipeline, analyst explores maps |
+| Two-layer architecture | Wherobots MCP (data eng) + map with a Strands agent (exploration) | Clean separation: data engineer builds pipeline, analyst explores maps |
 | Geographic scope | San Diego, CA | Wildfire + flood + severe weather overlap; compact for workshop |
 | Asset type | Buildings (Overture) | Available via Wherobots Open Data; ~1M in San Diego |
 | Iceberg as handoff | `org_catalog.gold` | The pipeline writes and the agent reads the same tables; no export or second database |
-| Map rendering | MapLibre GL JS on the participant's laptop | Open source, no account or key; maps are standard GeoJSON + MapLibre style files |
+| Map rendering | MapLibre GL JS + pre-built PMTiles on the participant's laptop | Open source, no account or key; every building draws instantly, and live queries are only for specific questions |
 | Gold persistence | Iceberg (GeoParquet optional) | One copy for reprocessing, analysis and the map agent |
 | Normalization | Min-max (0–1 range) | Intuitive for workshop; AOI-relative (not comparable across regions) |
 | Risk tiers | Critical / High / Elevated / Moderate / Low | 5 tiers via `percent_rank` — quantile-based, so AOI-relative |

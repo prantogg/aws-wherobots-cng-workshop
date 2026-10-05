@@ -22,30 +22,29 @@
 - Verify 4 Gold tables in your Wherobots catalog with industry-specific risk tiers
 
 **Part 2 — Map Builder AI Agent** (Strands + Bedrock + Wherobots MCP + MapLibre)
-- Run a Strands agent that queries the Gold tables through the Wherobots MCP
-- Create interactive MapLibre maps from natural language: *"Show buildings with high wildfire risk near Poway"*
-- Watch a local map update after every answer; every map is plain GeoJSON plus a MapLibre style
+- Open a MapLibre map of every building you scored, coloured by risk for four industries
+- Ask a Strands agent about it: *"Which neighbourhoods have the most critical buildings for insurance?"*, *"Top 10 buildings by wildfire near Tierrasanta"*
+- The agent drives the map and answers from your own Gold tables through the Wherobots MCP
 
 ## Architecture
 
 ```
-Part 1: Data Engineering Agent          Part 2: End-User Map Agent
+Part 1: Data Engineering Agent          Part 2: Map + Strands Agent
 ─────────────────────────────           ──────────────────────────
-Developer in Claude Code / Kiro         Strands Agent (Bedrock Claude)
-        │                                       │
-        ▼                                       ▼
+Developer in Claude Code / Kiro         Browser: MapLibre map + chat
+        │                                       │ ▲ map tools run here
+        ▼                                       ▼ │
 ┌─────────────────────┐               ┌───────────────────────┐
-│ Wherobots MCP       │               │ Wherobots MCP         │
-│ Spatial SQL on      │   ┌───────────┤ + write_layer         │
-│ Apache Sedona       │   │  queries  │ + publish_map         │
-└────────┬────────────┘   │           └───────────┬───────────┘
-         │                │                       │ GeoJSON + map.json
-         ▼                ▼                       ▼
- Bronze → Silver → Gold ─────────┐      ┌───────────────────────┐
-                                 │      │ MapLibre viewer       │
-          org_catalog.gold       │      │ localhost:8765        │
-          Iceberg, ~1M × 4  ◀────┘      │ updates after answers │
-                                        └───────────────────────┘
+│ Wherobots MCP       │               │ Strands Agent         │
+│ Spatial SQL on      │   ┌───────────┤ (Bedrock Claude)      │
+│ Apache Sedona       │   │  queries  │ + Wherobots MCP       │
+└────────┬────────────┘   │  via MCP  └───────────────────────┘
+         │                │
+         ▼                ▼
+ Bronze → Silver → Gold ─────────┐      Map tiles of every building,
+                                 │      pre-built, from a public
+          org_catalog.gold       │      bucket ──► browser
+          Iceberg, 357K × 4 ◀────┘
 ```
 
 > See [architecture.md](architecture.md) for the full architecture with data sources, layer details, and design decisions.
@@ -76,14 +75,16 @@ It walks you through everything in order — setup (clone, credentials, MCP conf
 │   ├── custom-pipelines/              # Participant-generated pipeline variations
 │   └── skills/wherobots-pipeline/     # Skill that guides MCP toward deterministic output
 │
+├── part2_map_app/
+│   ├── serve.py                       # Local server: Strands agent, building queries, static files (localhost:8765)
+│   ├── index.html                     # MapLibre map, chat, and the map tools the agent calls
+│   ├── copilot.json                   # Agent system prompt + map tool definitions
+│   ├── api/                           # The same endpoints for a Vercel deploy (take-home)
+│   └── data/                          # Wherobots export + publish steps for the map tiles
+│
 ├── part2_map_agent/
-│   ├── agent.py                       # Strands Agent (Bedrock Claude + Wherobots MCP + map tools)
-│   ├── run.sh                         # Agent launcher
-│   ├── requirements.txt               # Python dependencies
-│   ├── CLAUDE.md                      # Part 2 agent guide
-│   ├── viewer/index.html              # MapLibre viewer served on localhost:8765
-│   └── skills/
-│       └── open-mapping/              # Skill: map spec, styling expressions, tier palette
+│   ├── requirements.txt               # Python dependencies (Part 2 installs these)
+│   └── agent.py, viewer/, skills/     # Earlier terminal map agent, not used in the workshop
 │
 ├── scripts/
 │   ├── bootstrap.py                   # Wherobots org_catalog ingest (Bronze)
@@ -99,8 +100,8 @@ It walks you through everything in order — setup (clone, credentials, MCP conf
 |-----------|-----------|------|
 | **Data Processing** | Wherobots Cloud (Apache Sedona) + Wherobots MCP | Spatial SQL, medallion pipeline, agent queries |
 | **Data Store** | Wherobots catalog (Apache Iceberg) | Gold tables for pipelines and the agent |
-| **AI Orchestration** | Amazon Bedrock (Claude Opus 4.8) + Strands Agents SDK | Agent that turns questions into queries and maps |
-| **Visualization** | MapLibre GL JS + OpenFreeMap | Interactive maps from GeoJSON and MapLibre styles |
+| **AI Orchestration** | Amazon Bedrock (Claude Opus 4.8) + Strands Agents SDK | Agent that drives the map and answers questions with queries |
+| **Visualization** | MapLibre GL JS + OpenFreeMap + PMTiles | An interactive map of every building |
 
 ---
 
