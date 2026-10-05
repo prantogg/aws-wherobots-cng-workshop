@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Run the San Diego map app locally: static files, /api/chat on Amazon Bedrock, and /api/query
-on your own Wherobots Gold tables through the Wherobots MCP.
+"""Run the San Diego map app locally: static files, the copilot (a Strands agent on Amazon
+Bedrock) at /api/chat, and /api/query on your own Wherobots Gold tables through the Wherobots MCP.
 
     .venv/bin/python part2_map_app/serve.py          # then open http://localhost:8765
 
-The copilot's system prompt and tools live in copilot.json, shared with api/chat.js (the
-Vercel version, which calls the Anthropic API with your own key instead). The model runs on
-Bedrock with your AWS credentials and building queries run in your Wherobots organization with
+The agent has two kinds of tools. Map tools (copilot.json, shared with the Vercel api/chat.js)
+run in the browser, because they change the map: the agent pauses on a Strands interrupt, the
+browser runs the tool and posts the result back, and the agent resumes. Wherobots MCP tools run
+here, so the agent can also answer free-form questions about your Gold tables in SQL. The model
+runs on Bedrock with your AWS credentials and queries run in your Wherobots organization with
 your WHEROBOTS_API_KEY; neither leaves this machine. The map tiles are read straight from the
 public bucket by the browser.
 """
@@ -33,13 +35,21 @@ import boto3
 import httpx2
 import pyarrow.parquet as pq
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+from strands import Agent
+from strands.interrupt import InterruptException
+from strands.models.bedrock import BedrockModel
 from strands.tools.mcp import MCPClient
+from strands.types._events import ToolInterruptEvent, ToolResultEvent
+from strands.types.tools import AgentTool, ToolContext
 
 PORT = int(os.environ.get("MAP_APP_PORT", "8765"))
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-8")
 REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
-MAX_MESSAGES = 40
 MAX_PAYLOAD_CHARS = 100_000
+MAX_SESSIONS = 50
+# Wherobots MCP tools the agent gets: catalog discovery and read-only SQL.
+MCP_TOOLS = {"list_catalogs_tool", "list_databases_tool", "list_tables_tool", "describe_table_tool",
+             "submit_query_tool", "get_query_status_tool", "get_query_results_tool"}
 
 WHEROBOTS_MCP_URL = os.environ.get("WHEROBOTS_MCP_URL", "https://api.cloud.wherobots.com/mcp")
 GOLD = "org_catalog." + os.environ.get("GOLD_DB", "gold")
@@ -47,7 +57,14 @@ MAX_RADIUS_M = 20_000
 MAX_LIMIT = 50
 
 COPILOT = json.loads((APP_DIR / "copilot.json").read_text())
-bedrock = boto3.client("bedrock-runtime", region_name=REGION)
+SYSTEM = COPILOT["system"] + f"""
+
+SQL: for a question the map tools can't answer (counts with a condition, comparisons, a column the
+map doesn't show), query the Gold tables yourself with the Wherobots tools: {GOLD}.insurance_exposure,
+.cre_risk, .capital_markets_signals and .energy_asset_risk, joined on asset_id. Describe a table before
+querying it, aggregate rather than list rows, and if submit_query_tool returns a running job, poll
+get_query_status_tool, then fetch get_query_results_tool. Prefer the map tools when they fit: their
+answers also show on the map. Never mention SQL or table names to the user."""
 wherobots_mcp = MCPClient(
     lambda: streamable_http_client(
         WHEROBOTS_MCP_URL,
@@ -69,16 +86,65 @@ METRICS = {
 }
 
 
-def chat(messages):
-    body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 1024,
-        "system": COPILOT["system"],
-        "tools": COPILOT["tools"],
-        "messages": messages,
-    }
-    r = bedrock.invoke_model(modelId=MODEL_ID, body=json.dumps(body))
-    return json.loads(r["body"].read())
+class BrowserTool(AgentTool):
+    """A map tool the browser runs: the agent pauses on an interrupt until the result comes back."""
+
+    def __init__(self, spec):
+        super().__init__()
+        self._spec = {"name": spec["name"], "description": spec["description"],
+                      "inputSchema": {"json": spec["input_schema"]}}
+
+    @property
+    def tool_name(self):
+        return self._spec["name"]
+
+    @property
+    def tool_spec(self):
+        return self._spec
+
+    @property
+    def tool_type(self):
+        return "browser"
+
+    async def stream(self, tool_use, invocation_state, **kwargs):
+        ctx = ToolContext(tool_use=tool_use, agent=invocation_state["agent"], invocation_state=invocation_state)
+        try:
+            out = ctx.interrupt("browser-" + tool_use["toolUseId"],
+                                reason={"name": self.tool_name, "input": tool_use["input"]})
+        except InterruptException as e:
+            yield ToolInterruptEvent(tool_use, [e.interrupt])
+            return
+        yield ToolResultEvent({"toolUseId": tool_use["toolUseId"], "status": "success", "content": [{"json": out}]})
+
+
+sessions = {}   # browser session id -> (Agent, lock); one conversation per open page
+
+
+def new_agent():
+    tools = [BrowserTool(t) for t in COPILOT["tools"]]
+    tools += [t for t in wherobots_mcp.list_tools_sync() if t.tool_name in MCP_TOOLS]
+    return Agent(model=BedrockModel(model_id=MODEL_ID, region_name=REGION, max_tokens=2048),
+                 system_prompt=SYSTEM, tools=tools, callback_handler=None)
+
+
+def chat(body):
+    """One turn: a new user message, or the browser's results for the map tools the agent asked for.
+    Returns the agent's text and, if it paused for the browser, the map tools to run."""
+    sid = str(body.get("session") or "")
+    if sid not in sessions:
+        if len(sessions) >= MAX_SESSIONS:
+            sessions.pop(next(iter(sessions)))
+        sessions[sid] = (new_agent(), threading.Lock())
+    agent, lock = sessions[sid]
+    if body.get("results"):
+        prompt = [{"interruptResponse": {"interruptId": r["id"], "response": r["output"]}} for r in body["results"]]
+    else:
+        prompt = str(body.get("message") or "")
+    with lock:
+        r = agent(prompt)
+    text = "\n".join(c["text"] for c in (r.message or {}).get("content", []) if "text" in c).strip()
+    calls = [{"id": i.id, **i.reason} for i in (r.interrupts or [])]
+    return {"text": text, "tool_calls": calls}
 
 
 def _mcp(name, arguments):
@@ -176,18 +242,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(200, query_buildings(json.loads(raw or b"{}")))
             except Exception as e:  # surface Wherobots errors (bad key, missing Gold tables) to the chat
                 return self._json(502, {"error": f"{type(e).__name__}: {e}"})
-        try:
-            messages = json.loads(raw or b"{}").get("messages") or []
-        except ValueError:
-            return self._json(400, {"error": "invalid JSON"})
-        if not isinstance(messages, list) or not messages:
-            return self._json(400, {"error": "no messages provided"})
-        if len(messages) > MAX_MESSAGES:
-            return self._json(400, {"error": "conversation too long — start a new chat"})
         if len(raw) > MAX_PAYLOAD_CHARS:
             return self._json(413, {"error": "message payload too large"})
         try:
-            return self._json(200, chat(messages))
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            return self._json(400, {"error": "invalid JSON"})
+        if not body.get("message") and not body.get("results"):
+            return self._json(400, {"error": "no message provided"})
+        try:
+            return self._json(200, chat(body))
         except Exception as e:  # surface Bedrock errors (expired credentials, model access) to the chat
             return self._json(502, {"error": f"{type(e).__name__}: {e}"})
 
@@ -212,7 +276,7 @@ def main():
     except OSError:
         print(f"⚠️  Port {PORT} is busy; set MAP_APP_PORT to a free port.")
         sys.exit(1)
-    print(f"🗺️  San Diego risk map: http://localhost:{PORT}  (model: {MODEL_ID} on Bedrock, {REGION}; "
+    print(f"🗺️  San Diego risk map: http://localhost:{PORT}  (Strands agent, {MODEL_ID} on Bedrock, {REGION}; "
           f"building queries on {GOLD} via the Wherobots MCP)")
     print("   Ctrl+C to stop.")
     try:

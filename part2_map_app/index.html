@@ -377,39 +377,41 @@ const TOOL_LABEL = { set_lens:i => "Switching to the " + i.lens + " lens", set_h
   query_properties:i => "Querying buildings" + (i.place ? " near " + i.place : ""), fit_city:() => "Zooming out",
   clear_highlights:() => "Clearing highlights", get_map_state:() => "Reading the map" };
 
-// ---------------------------------------------------------------- copilot loop (from the CO app)
-const cop = {}; const copMsgs = []; let copThinkEl = null;
+// ---------------------------------------------------------------- copilot loop
+// The agent runs on the server (Strands on Bedrock in serve.py). When it calls a map tool it
+// pauses and returns tool_calls; the browser runs them against the map and posts the results back.
+// `state` is only used by the Vercel api/chat.js, which keeps the conversation in the browser.
+const cop = {}; let copThinkEl = null, copState = null;
+const copSession = Math.random().toString(36).slice(2) + Date.now().toString(36);
 function copBubble(role, text){ const d = document.createElement("div"); d.className = "cop-b " + role; d.textContent = text; cop.list.appendChild(d); cop.list.scrollTop = cop.list.scrollHeight; return d; }
 function copThink(on, text){ if(on){ if(!copThinkEl){ copThinkEl = copBubble("assistant", text || "Thinking…"); copThinkEl.classList.add("thinking"); } else copThinkEl.textContent = text || "Thinking…"; }
   else if(copThinkEl){ copThinkEl.remove(); copThinkEl = null; } }
-async function copRun(){
-  for(let round = 0; round < 8; round++){
+async function copRun(message){
+  let body = { message };
+  for(let round = 0; round < 12; round++){
     copThink(true, "Thinking…");
     let data;
     try{
-      const r = await fetch("/api/chat", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ messages:copMsgs }) });
+      const r = await fetch("/api/chat", { method:"POST", headers:{"content-type":"application/json"},
+        body:JSON.stringify({ session:copSession, state:copState, ...body }) });
       data = await r.json();
       if(!r.ok){ copThink(false); copBubble("assistant", "⚠ " + (data && data.error ? data.error : "error " + r.status)); return; }
     }catch(e){ copThink(false); copBubble("assistant", "⚠ Couldn't reach the copilot. Is serve.py running?"); return; }
-    copMsgs.push({ role:"assistant", content:data.content });
-    const txt = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
-    const tus = (data.content || []).filter(b => b.type === "tool_use");
-    if(data.stop_reason === "tool_use" && tus.length){
-      if(txt){ copThink(false); copBubble("assistant", txt); }
-      copThink(true, tus.map(tu => TOOL_LABEL[tu.name] ? TOOL_LABEL[tu.name](tu.input || {}) : tu.name).join(" · ") + "…");
-      await DATA_READY;
-      const results = await Promise.all(tus.map(async tu => { let out;
-        try{ out = mapTools[tu.name] ? await mapTools[tu.name](tu.input || {}) : {error:"unknown tool " + tu.name}; }
-        catch(e){ out = {error:String(e && e.message || e)}; }
-        return { type:"tool_result", tool_use_id:tu.id, content:JSON.stringify(out) }; }));
-      copMsgs.push({ role:"user", content:results });
-      continue;
-    }
-    copThink(false); copBubble("assistant", txt || "(done)"); return;
+    copState = data.state || null;
+    const calls = data.tool_calls || [];
+    if(!calls.length){ copThink(false); copBubble("assistant", data.text || "(done)"); return; }
+    if(data.text){ copThink(false); copBubble("assistant", data.text); }
+    copThink(true, calls.map(c => TOOL_LABEL[c.name] ? TOOL_LABEL[c.name](c.input || {}) : c.name).join(" · ") + "…");
+    await DATA_READY;
+    const results = await Promise.all(calls.map(async c => { let out;
+      try{ out = mapTools[c.name] ? await mapTools[c.name](c.input || {}) : {error:"unknown tool " + c.name}; }
+      catch(e){ out = {error:String(e && e.message || e)}; }
+      return { id:c.id, output:out }; }));
+    body = { results };
   }
   copThink(false);
 }
-function copSend(){ const t = cop.text.value.trim(); if(!t) return; cop.text.value = ""; copBubble("user", t); copMsgs.push({ role:"user", content:t }); copRun(); }
+function copSend(){ const t = cop.text.value.trim(); if(!t) return; cop.text.value = ""; copBubble("user", t); copRun(t); }
 (function(){
   cop.panel = document.getElementById("copilot"); cop.list = document.getElementById("cop-msgs"); cop.text = document.getElementById("cop-text");
   document.getElementById("copilot-fab").onclick = () => { cop.panel.style.display = "flex"; document.getElementById("copilot-fab").style.display = "none";

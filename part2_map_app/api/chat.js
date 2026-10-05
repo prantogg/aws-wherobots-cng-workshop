@@ -1,7 +1,9 @@
 // San Diego Risk Copilot — Anthropic Messages API proxy for the Vercel deploy (holds the key
 // server-side). The system prompt and tool schemas live in ../copilot.json, shared with
-// serve.py, which runs the same copilot on Amazon Bedrock for the local workshop. The browser
-// executes the returned tool_use calls against the MapLibre map and posts back tool_results.
+// serve.py, which runs the same copilot as a Strands agent on Amazon Bedrock for the local
+// workshop. Same protocol as serve.py: the browser posts {message} or {results}, gets back
+// {text, tool_calls}, runs the tool calls against the MapLibre map and posts the results. A
+// serverless function keeps no session, so the conversation travels in `state` instead.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -44,8 +46,12 @@ export default async function handler(req, res){
   if(rl.limited){ res.setHeader("Retry-After","30"); res.status(429).json({error: rl.scope==="global" ? "The copilot is busy right now — please try again in a moment." : "You're sending messages too quickly — please wait a few seconds and try again."}); return; }
   let body = req.body;
   if(!body || typeof body === "string"){ try{ body = JSON.parse(body||"{}"); }catch(e){ body = {}; } }
-  const messages = (body && body.messages) || [];
-  if(!Array.isArray(messages) || messages.length === 0){ res.status(400).json({error:"no messages provided"}); return; }
+  const messages = Array.isArray(body && body.state) ? body.state : [];
+  if(body && Array.isArray(body.results) && body.results.length){
+    messages.push({ role:"user", content: body.results.map(r => ({ type:"tool_result", tool_use_id:r.id, content:JSON.stringify(r.output) })) });
+  }else if(body && body.message){
+    messages.push({ role:"user", content:String(body.message) });
+  }else{ res.status(400).json({error:"no message provided"}); return; }
   if(messages.length > MAX_MESSAGES){ res.status(400).json({error:"conversation too long — start a new chat"}); return; }
   if(JSON.stringify(messages).length > MAX_PAYLOAD_CHARS){ res.status(413).json({error:"message payload too large"}); return; }
   try{
@@ -60,6 +66,11 @@ export default async function handler(req, res){
       })
     });
     const data = await r.json();
-    res.status(r.status).json(data);
+    if(!r.ok){ res.status(r.status).json({error:(data.error && data.error.message) || "error " + r.status}); return; }
+    messages.push({ role:"assistant", content:data.content });
+    const text = data.content.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+    const tool_calls = data.stop_reason === "tool_use"
+      ? data.content.filter(b => b.type === "tool_use").map(b => ({ id:b.id, name:b.name, input:b.input })) : [];
+    res.status(200).json({ text, tool_calls, state:messages });
   }catch(e){ res.status(502).json({error:String(e)}); }
 }
