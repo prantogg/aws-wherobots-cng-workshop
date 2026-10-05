@@ -15,7 +15,7 @@ An end-to-end geospatial AI pipeline that scores **357,263 buildings in the City
 Walk through a Wherobots MCP-powered medallion pipeline (Bronze → Silver → Gold) that turns satellite imagery and weather events into per-building risk scores, stored as Apache Iceberg tables in your Wherobots catalog.
 
 **Part 2 — Map Builder AI Agent** (~40 min)
-Run an AI agent that takes prompts like *"Show me buildings with high wildfire risk near Poway"* and draws styled, interactive maps on your laptop — powered by Strands Agents SDK, Amazon Bedrock (Claude), the Wherobots MCP, and MapLibre GL JS.
+Open a map of every building you scored and ask a Strands agent about it: *"Which neighbourhoods have the most critical buildings for insurance?"*, *"Top 10 buildings by wildfire near Tierrasanta"*. The agent drives the map and answers from your own Gold tables — powered by Strands Agents SDK, Amazon Bedrock (Claude), the Wherobots MCP, and MapLibre GL JS.
 
 ---
 
@@ -99,6 +99,17 @@ aws bedrock-runtime converse \
 ```
 
 The second command should print `"ready"`. An `AccessDeniedException` means model access for **Claude Opus 4.8** isn't enabled in `us-west-2` (Bedrock console → *Model access*), or your role lacks Bedrock permissions; see Troubleshooting.
+
+The Strands agent in Part 2 streams its answers (Bedrock `ConverseStream`), which needs its own permission and has no AWS CLI command. Check it from the venv you made in Step 1:
+
+```bash
+AWS_DEFAULT_REGION=us-west-2 .venv/bin/python -c "
+import boto3
+r = boto3.client('bedrock-runtime').converse_stream(modelId='us.anthropic.claude-opus-4-8', messages=[{'role': 'user', 'content': [{'text': 'Reply with the word ready'}]}])
+print(''.join(e['contentBlockDelta']['delta'].get('text', '') for e in r['stream'] if 'contentBlockDelta' in e))"
+```
+
+It should print `ready`. If `converse` worked but this fails with `AccessDeniedException`, your role allows `bedrock:Converse` but not `bedrock:ConverseStream`; see Troubleshooting.
 
 ### Step 3 — Configure credentials
 
@@ -319,53 +330,50 @@ You should see:
 
 ### Overview
 
-Now let's make the data visual. You'll run an AI agent that turns natural language prompts into interactive maps. The agent:
+Now let's make the data visual. You'll open a map of every building you scored in Part 1 and talk to an AI agent that drives it. The agent:
 
-1. Uses **Amazon Bedrock (Claude)** to interpret your prompt and plan the analysis
-2. Queries the Gold tables in your Wherobots catalog through the **Wherobots MCP**
-3. Saves the answer as a map layer and a small map description (a MapLibre style)
-4. Shows it in a **MapLibre** map on your laptop that updates after every answer
+1. Is a **Strands agent** on **Amazon Bedrock (Claude)** that runs on your laptop
+2. Drives the map with **map tools**: switch the industry lens, colour by a hazard, rank neighbourhoods, find hotspots, fly to a place
+3. Answers building-level questions from **your own Gold tables** through the **Wherobots MCP**, and draws the answers on the map
+4. Writes its own SQL for questions no map tool covers
 
-Everything the map needs is open: MapLibre GL JS for rendering, an OpenFreeMap basemap, and GeoJSON files on your disk. No map account, no API key.
+The map shows all 357,263 buildings at once: dots when zoomed out, footprints from street level, coloured by risk. Those map tiles were built ahead of time from the same pipeline and are served from a public bucket, so the map opens instantly. Every answer the agent gives about specific buildings comes from your Part 1 tables. Everything the map needs is open: MapLibre GL JS for rendering, an OpenFreeMap basemap, PMTiles for the buildings. No map account, no API key.
 
 ### Architecture
 
 ```
-User: "Show me buildings with high wildfire risk near Poway"
+User: "Top 10 buildings by wildfire near Tierrasanta"
                     │
                     ▼
-        ┌───────────────────────────┐
-        │  Strands Agent            │
+   Browser (MapLibre map + chat)  ◄──────────────┐
+                    │                            │ map tools run here:
+                    ▼                            │ set lens, fly to, draw markers
+        ┌───────────────────────────┐            │
+        │  Strands Agent            │────────────┘
         │  (Bedrock Claude)         │
+        │  part2_map_app/serve.py   │
         │                           │
-        │  Tools: Wherobots MCP     │
-        │         write_layer       │
-        │         publish_map       │
+        │  Tools: 9 map tools       │
+        │         Wherobots MCP     │
         └─────────────┬─────────────┘
                       │ SQL via MCP
                       ▼
         ┌───────────────────────────┐
         │  Wherobots Cloud          │
         │  org_catalog.gold.*       │
-        │  (Iceberg, ~1M × 4)       │
-        └─────────────┬─────────────┘
-                      │ query result
-                      ▼
-        viewer/maps/<map>/  (GeoJSON + map.json)
-                      │
-                      ▼
-        MapLibre viewer — http://localhost:8765 🗺️
+        │  (Iceberg, 357K × 4)      │
+        └───────────────────────────┘
+
+   Map tiles (every building, pre-built) ── public bucket ──► browser
 ```
 
 ### Prerequisites for Part 2
 
-Part 2 runs the Strands agent locally in **the Python virtualenv you created in
-Setup Step 1**. Before continuing, make sure you have it activated:
+Part 2 runs in **the Python virtualenv you created in Setup Step 1**. From the repo root:
 
 ```bash
-# From the repo root
 source .venv/bin/activate
-python -c "import strands, mcp, geopandas; print('venv OK')"
+python -c "import strands, mcp, pyarrow; print('venv OK')"
 ```
 
 If `.venv/` doesn't exist or the import errors, re-run Setup Step 1:
@@ -376,122 +384,83 @@ source .venv/bin/activate
 pip install -r part2_map_agent/requirements.txt
 ```
 
-`./run.sh` auto-sources `.venv/bin/activate` for each invocation, but the venv
-itself must already exist. Without it you'll see `ModuleNotFoundError: No
-module named 'strands'` (or similar) when the agent starts.
+Part 2 reads the Gold tables your Part 1 run produced (`org_catalog.gold.*`), so silver-to-gold must have finished first. It also needs `WHEROBOTS_API_KEY` and `WHEROBOTS_RUNTIME_ID=micro` in `.env`, and the Bedrock checks from Setup Step 2 to pass.
 
-Part 2 reads the Gold tables your Part 1 run produced (`org_catalog.gold.*`), so silver-to-gold must have finished first.
-
-### Step 1 — Navigate to the agent and understand the tools (5 min)
+### Step 1 — Start the app (5 min)
 
 ```bash
-cd part2_map_agent
+python part2_map_app/serve.py
 ```
 
-The agent has two kinds of tools:
+Open **http://localhost:8765**. You're looking at every building in the City of San Diego, coloured by its insurance risk tier: dark magenta for critical, orange for high. The panel on the left switches the **industry lens** (insurance, CRE, capital markets, energy) and the **colour** (overall risk, or one hazard), and lists the top neighbourhoods for the current view.
 
-| Tool | Purpose |
-|----------|---------|
-| Wherobots MCP (`describe_table_tool`, `submit_query_tool`, …) | Explore tables and test queries when the agent needs to |
-| `write_layer` | Run the final query and save the result as a map layer, returning value ranges and categories so the agent can pick sensible colours |
-| `publish_map` | Save the map description (layers, colours, legend, popups) and update the viewer |
+Try it by hand before asking the agent anything:
+- **Colour by Wildfire**, then zoom into the canyon edges along Mission Trails (Tierrasanta, San Carlos, Del Cerro). From street level the dots become building footprints.
+- **Click a building** to see its scores for all four lenses and its three hazard factors.
+- **Switch to the Energy lens** and watch the top-neighbourhoods list change: the same buildings, a different industry's view of them.
 
-The agent learns the map format from one skill, **`skills/open-mapping/SKILL.md`**: how to colour by a number or a category, the risk-tier palette, and how to handle answers too big to draw building by building.
+<!-- screenshot: step1-1 the city at zoom 10, insurance lens; step1-2 Tierrasanta footprints coloured by wildfire -->
 
-The map itself is `viewer/index.html`: MapLibre GL JS on an OpenFreeMap basemap, about 150 lines.
+### Step 2 — Ask the agent (15 min)
 
-### Step 2 — Run the agent: from a simple map to a stunning one (15 min)
+Click **💬 Ask the map**. Start with questions the map tools answer on their own:
 
-Start the agent in **interactive mode**:
+> *"Which neighbourhoods have the most critical buildings for insurance?"*
 
-```bash
-./run.sh
-```
+The agent ranks the neighbourhoods and marks them on the map: **Del Cerro (2,132), Tierrasanta (2,037) and Normal Heights (1,893)** lead. The first two are the canyon edges of Mission Trails Regional Park, the city's wildland-urban interface.
 
-Then open **http://localhost:8765** in your browser and keep that tab open. It shows *No map yet* until the first answer, then switches to each new map by itself.
+> *"Switch to the energy lens and show me the top 5 neighbourhoods by critical buildings."*
 
-> **The first answer takes a minute or two** while Wherobots starts compute for your queries (the agent starts it as soon as it launches). Later answers come back in seconds to about a minute.
+Two tools in one answer: the lens switches, then the ranking runs. Rancho Bernardo (1,366) leads by nearly two to one over Tijuana River Valley (703): the energy lens weights wildfire and severe weather most (0.40 each).
 
-Try this first prompt — it builds a **triage map** of the buildings an underwriter should look at first:
+> *"Show me the wildfire hotspots in Tierrasanta."*
 
-> **Suggested prompt:** *"As an insurance underwriter, map the high and critical risk buildings across San Diego County on a dark basemap, colored by risk tier — red for high, dark red for critical."*
+The agent highlights the highest-risk hexagons (about 0.7 km² each) and fits the map to them.
 
-**What happens behind the scenes:**
-1. The agent writes a query for the high and critical insurance buildings
-2. `write_layer` runs it and reports the result's size and value ranges
-3. The agent designs the map: colours for each tier, a legend, popups
-4. `publish_map` saves it, and your browser tab updates
+<!-- screenshot: step2-1 top neighbourhoods marked; step2-2 Tierrasanta hotspots -->
 
-**What you'll see:** there are **205,454** high and critical buildings in the county (154,090 high, 51,364 critical). That's more than the agent draws one by one (it works within 10,000 features per layer), so it will usually group them into small hexagons coloured by their dominant tier, and tell you it did. The pattern is the point: the risk rakes across the **eastern backcountry** (Poway, Ramona, Julian), the wildland-urban interface, *not* the coast. Wildfire is the escalator that pushes a building into the critical tier.
+### Step 3 — Ask about specific buildings (10 min)
 
-> **Tip:** Ask a follow-up: *"add a popup showing the building count and average risk score for each hexagon."* Follow-ups on the same map keep your current zoom and position.
+Now a question about individual buildings, answered from **your** Gold tables:
 
-<!-- screenshot: step2-1 hexagons coloured by dominant tier (dark basemap) -->
+> *"Top 10 buildings by wildfire within 1 mile of Tierrasanta."*
 
-#### Now make it cool — a heatmap that resolves into the buildings
+The agent calls `query_properties`, which runs a spatial query on Wherobots through the MCP and draws numbered markers with a results panel. Scores run from about 0.25 down to 0.08, and all ten are insurance-critical.
 
-Stay in the same agent session and add more layers. A single follow-up turns the map into a **zoom-aware** view: a risk-density heatmap when you're zoomed out, individual buildings when you zoom in.
+> **The first question that queries Wherobots takes about a minute** while compute starts (the app starts it as soon as it launches). Later ones take 10–20 seconds. After about 5 idle minutes the next one starts compute again.
 
-> **Suggested prompt:** *"Now add a risk-density layer: aggregate these buildings into an H3 hexbin heatmap colored by their average risk score, with fine bins. Make the heatmap fade out as I zoom in while the buildings fade in — so I see county-wide hotspots when zoomed out and the actual buildings when zoomed in."*
+Then a question no map tool covers:
 
-**What the agent does:**
-1. `write_layer` → fine H3 hexagons with the average `risk_score` of the buildings inside each
-2. `write_layer` → a building layer for the zoomed-in view (within the 10,000-feature limit, so the agent picks the most relevant buildings, such as the critical tier, and says so)
-3. `publish_map` → MapLibre zoom expressions on the layers' opacity: the hexagons fade out and the buildings fade in as you zoom
+> *"How many buildings in the city have a wildfire factor above 0.2, and how many are commercial vs residential?"*
 
-**What you'll see:** zoomed out, the county glows with **average-risk hotspots**. Zoom in past about z12 and the hexagons dissolve into the actual buildings, tier-coloured and clickable. Same data, two reading altitudes, entirely driven by style.
+There is no tool for this, so the agent looks up the table, writes the SQL itself, and runs it through the Wherobots MCP. The answer: **3,157 buildings**, and most of them (about 91%) have no building class in Overture, so a commercial/residential split isn't reliable. A good agent says so rather than guessing.
 
-> **Why it works:** the zoom behaviour is a MapLibre style expression (`["interpolate", ["linear"], ["zoom"], …]` on `fill-opacity`), not special viewer code. Open `viewer/maps/<map>/map.json` to see exactly what the agent wrote.
+<!-- screenshot: step3-1 numbered markers around Tierrasanta with the results panel -->
 
-<!-- screenshot: step2-2 zoomed-out hexbin heatmap; step2-3 zoomed-in cross-fade -->
+### Step 4 — How the agent works (5 min)
 
-### Step 3 — Explore with more prompts (15 min)
+The agent in `part2_map_app/serve.py` is a Strands `Agent` with two kinds of tools:
 
-Continue in **interactive mode** — the agent remembers context from previous maps. Try these prompts to explore different perspectives:
+| Tools | Where they run | What they do |
+|---|---|---|
+| **Map tools** (`set_lens`, `set_hazard`, `focus_place`, `fit_city`, `find_top_places`, `find_hexes`, `clear_highlights`, `get_map_state`, `query_properties`) | In your browser | Change the map, or read the data it loaded. When the agent calls one, it pauses on a Strands **interrupt**, the page runs the tool, and the agent resumes with the result |
+| **Wherobots MCP tools** (list and describe tables, run SQL) | In `serve.py` | Answer questions about your Gold tables that no map tool covers |
 
----
+`query_properties` never lets the model write SQL: it takes a place, a radius, a metric and a limit, and fills a fixed template over the four Gold tables. Open `part2_map_app/copilot.json` to see the system prompt (including the per-neighbourhood numbers the agent is allowed to quote) and the map tool definitions.
 
-**Spatial query:**
+### Step 5 — Bonus: change the app (5 min)
 
-> *"What are the 100 highest-risk buildings within 10 miles of downtown San Diego (32.7157, -117.1611)? Show them on a map, and draw the 10-mile radius as a visible buffer circle for context."*
+The app is about 430 lines of plain HTML and JavaScript (`part2_map_app/index.html`) with no build step. Ask Kiro to change it, for example *"add a dark basemap toggle"* or *"add a wildfire threshold slider that filters the buildings"*, and reload the page.
 
-The agent runs a distance query on Wherobots and adds a second layer with the 10-mile circle (transparent fill, visible outline). Notice where the top 100 sit inside the circle, and ask the agent what drives their scores; the answer is different from the backcountry.
-
-<!-- screenshot: step3-1 top 100 within 10 miles, with buffer circle -->
-
----
-
-**The wildfire story:**
-
-> *"Map all buildings near Poway with wildfire_factor above 0.3. Use a heat gradient to show severity."*
-
-These are buildings at the wildland-urban interface. The gradient shows which specific buildings face the highest burn probability — the 2003 Cedar Fire and 2007 Witch Creek Fire swept through this area.
-
-<!-- screenshot: step3-2 Poway wildfire gradient -->
-
-### Step 4 — Explore the map (5 min)
-
-In the map tab you can:
-- **Click** buildings or hexagons to see their scores and factor breakdowns
-- **Zoom and pan** — follow-ups on the same map keep your view; a new map jumps to its own area
-- **Ask for changes in words** — *"make it a light basemap"*, *"only show wildfire above 0.5"*, *"add the energy view as a second layer"*
-- **Share a snapshot** — each answer ends with a permalink (`http://localhost:8765/?map=maps/<map>/map.json`) that always opens that map
-
-### Step 5 — Bonus: look under the hood (5 min)
-
-Every map is two kinds of plain files in `part2_map_agent/viewer/maps/<map>/`:
-- `<layer>.geojson` — the query result, readable by QGIS, geopandas, or any GIS
-- `map.json` — sources, layers, legend and popups in the MapLibre style format
-
-Open a `map.json`, change a colour in a `fill-color` expression, save, and reload the permalink. That's the whole rendering contract: the agent doesn't draw anything itself, it writes a standard style.
+**Take-home:** deploy it to Vercel with your own Anthropic API key; see `part2_map_app/README.md`.
 
 ### Key Takeaways — Part 2
 
-- The agent **reuses the Wherobots MCP** from Part 1: the same tables and the same SQL engine serve both the pipeline and the map agent
-- **Skills** (`.md` files) teach the agent the map format and styling conventions at runtime
-- The agent handles multi-step workflows: query → summarize the result → design the style → publish
-- **Open formats end to end** — Iceberg for the Gold tables, GeoJSON for answers, the MapLibre style spec for maps
-- Natural language makes spatial analysis accessible to non-technical users
+- The agent **reuses the Wherobots MCP** from Part 1: the same tables and the same SQL engine serve the pipeline, the agent's questions and the map's building queries
+- **Map tools run where the map is**: a Strands interrupt hands each one to the browser and the agent carries on with the result
+- **Fixed templates where they fit, free SQL where they don't**: building queries are predictable and fast; anything else, the agent can still answer
+- **Pre-built tiles for the whole picture, live queries for the details**: the map shows every building instantly, and specific questions go to your own tables
+- **Open formats end to end** — Iceberg for the Gold tables, PMTiles for the map, the MapLibre style spec for its look
 
 ---
 
@@ -504,12 +473,12 @@ Part 1 and Part 2 form a complete geospatial AI stack:
 | **Data Sources** | NOAA, USFS, OPERA (NASA), Overture Maps | Raw geospatial data |
 | **Spatial Processing** | Wherobots Cloud (Apache Sedona) | Spatial joins, zonal stats, risk scoring |
 | **Data Store** | Wherobots catalog (Apache Iceberg) | Gold tables for pipelines and the agent |
-| **AI Orchestration** | AWS Strands Agents SDK + Amazon Bedrock | Natural language → queries → maps |
-| **Visualization** | MapLibre GL JS + OpenFreeMap | Interactive maps from open styles and data |
+| **AI Orchestration** | AWS Strands Agents SDK + Amazon Bedrock | Natural language → map actions and queries |
+| **Visualization** | MapLibre GL JS + OpenFreeMap + PMTiles | An interactive map of every building |
 
 **Two modes of interaction:**
 - **Developer** — Wherobots MCP in your IDE to explore data and build pipelines (Part 1)
-- **Business user** — the map agent: plain-language questions, maps as answers (Part 2)
+- **Business user** — the map and its agent: plain-language questions, answers on the map (Part 2)
 
 **Two phases of the pipeline:**
 - **Part 1** is the **data pipeline** — reproducible, automated, runs on a schedule
@@ -533,15 +502,14 @@ In production, you'd use both: pipelines to keep data fresh, agents to let anyon
 | Problem | Solution |
 |---|---|
 | `AccessDeniedException` from Bedrock | Check IAM permissions + Claude model access in Bedrock console. The role needs `bedrock:Converse` / `bedrock:ConverseStream` (the Strands SDK uses the Converse API) in addition to `bedrock:InvokeModel*` — on AWS Workshop Studio accounts, make sure `WSParticipantRole` includes them. |
-| `AWS credentials for Bedrock are not working` at agent start | Your AWS session expired or isn't set. Refresh it (e.g. `aws sso login --profile <profile>`, or re-export the Workshop Studio credentials) and re-run `./run.sh`. |
+| `AWS credentials for Bedrock are not working` when the app starts | Your AWS session expired or isn't set. Refresh it (e.g. `aws sso login --profile <profile>`, or re-export the Workshop Studio credentials) and re-run `python part2_map_app/serve.py`. |
 | Wherobots MCP not connecting | Verify API key and `https://api.cloud.wherobots.com/mcp/` URL |
 | `MCP access is not enabled for your organization` | Your Wherobots API key belongs to a Community-tier org. Use a key from a **Professional or Enterprise** org (see Prerequisites). |
-| First answer takes minutes | Wherobots is starting compute for your queries. It stays warm while you keep asking; after about 5 idle minutes the next question starts it again. |
-| Map tab stays on *No map yet* | The agent hasn't published a map yet (watch the terminal), or the tab is an old copy: reload `http://localhost:8765` with Cmd+Shift+R. |
-| `Port 8765 is busy` | Another agent or server is using it. Quit it, or set `MAP_VIEWER_PORT=8766` in `.env` and open that port instead. |
-| Agent says the answer was capped at 10,000 | That's the per-layer limit. Narrow the question (an area, a tier) or ask for hexagons instead of buildings. |
-| Agent can't find a table or column | Part 1's silver-to-gold hasn't finished, or wrote to a different database. Check with the Wherobots MCP that `org_catalog.gold` has the four tables. |
-| Agent generates wrong SQL | Schema is in the system prompt — check `agent.py` for table definitions |
+| First building question takes a minute | Wherobots is starting compute for your queries. It stays warm while you keep asking; after about 5 idle minutes the next question starts it again. |
+| Map is blank or the chat says *Couldn't reach the copilot* | `serve.py` isn't running, or the tab is from an earlier run: start it again and reload `http://localhost:8765` with Cmd+Shift+R. |
+| `Port 8765 is busy` | Another server is using it. Quit it, or set `MAP_APP_PORT=8766` in `.env` and open that port instead. |
+| Building questions fail with a missing table | Part 1's silver-to-gold hasn't finished, or wrote to a different database. Check with the Wherobots MCP that `org_catalog.gold` has the four tables. |
+| Building questions return nothing | The place is outside the City of San Diego (Poway, Ramona and Julian are outside it), or the radius is too small. |
 | `ModuleNotFoundError` | Activate virtualenv: `source .venv/bin/activate` |
 
 ## Useful Links
@@ -552,5 +520,6 @@ In production, you'd use both: pipelines to keep data fresh, agents to let anyon
 - [Wherobots MCP Docs](https://docs.wherobots.com/develop/mcp/mcp-server-setup.md)
 - [Apache Sedona SQL Functions](https://sedona.apache.org/latest-snapshot/api/sql/Overview/)
 - [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/)
-- [MapLibre Style Spec](https://maplibre.org/maplibre-style-spec/) — the format of each map's `map.json`
-- [OpenFreeMap](https://openfreemap.org/) — the free basemap the viewer uses
+- [MapLibre Style Spec](https://maplibre.org/maplibre-style-spec/) — how the map's layers are styled
+- [PMTiles](https://docs.protomaps.com/pmtiles/) — the single-file tile format the building layers use
+- [OpenFreeMap](https://openfreemap.org/) — the free basemap the map uses
