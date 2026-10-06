@@ -216,6 +216,17 @@ Query a table with: SELECT ... FROM org_catalog.{GOLD_DB}.<table>
 Risk tiers: critical, high, elevated, moderate, low. All geometry is WGS84 (lng/lat).
 If unsure of a column, run SELECT * EXCEPT (geometry) ... LIMIT 1 first.
 
+## Area covered
+
+The tables cover only the area Part 1 ran. The workshop's reference run is the City of San Diego
+(about 357,000 buildings), which does NOT include Poway, Ramona, Julian, El Cajon, Chula Vista or
+the rest of San Diego County. When the user names a place, or asks about the county:
+- If the place may be outside the data, check first: compare it with the data's extent
+  (MIN/MAX of ST_X/ST_Y of the building centroids).
+- If it is outside, say so in one sentence, then map the nearest part of the data instead and
+  name it (for Poway: the city neighbourhoods on its border, Rancho Bernardo, Sabre Springs and
+  Scripps Ranch; for the county: the whole city). Never publish an empty map without saying why.
+
 ## Workflow
 
 1. When the filter is clear, go straight to write_layer: it waits for the query itself and
@@ -250,6 +261,9 @@ def get_model():
     return BedrockModel(
         model_id=os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-8"),
         region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2",
+        # Bedrock Converse, not ConverseStream: event roles that pass the Lab 00 `converse` check
+        # may still lack bedrock:ConverseStream.
+        streaming=False,
     )
 
 
