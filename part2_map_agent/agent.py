@@ -21,9 +21,12 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import timedelta
@@ -194,6 +197,117 @@ def publish_map(map_id: str, spec: dict) -> str:
             f"Permalink: http://localhost:{VIEWER_PORT}/?map=maps/{map_id}/map.json")
 
 
+# ── Your own PMTiles (optional) ────────────────────────────────
+# build_pmtiles runs jobs/build_pmtiles.py as a Wherobots job in the user's org; the viewer
+# reads the result from their managed storage through /tiles/ (see start_viewer).
+WHEROBOTS_API = "https://api.cloud.wherobots.com"
+WHEROBOTS_REGION = "aws-us-west-2"
+TILES_JOB = Path(__file__).parent / "jobs" / "build_pmtiles.py"
+MY_TILES = MAPS_DIR / "my-tiles.json"
+_TILE_PATH_RE = re.compile(r"^[0-9A-Za-z_-]+/sd_(points|buildings)\.pmtiles$")
+_signed = {}   # managed-storage path -> (presigned URL, time); the URLs expire after about a minute
+
+
+def _wb(method, path, body=None, query=None):
+    url = WHEROBOTS_API + path + ("?" + urllib.parse.urlencode(query) if query else "")
+    headers = {"X-API-Key": os.environ.get("WHEROBOTS_API_KEY", "")}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
+                                 method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        raw = r.read()
+        return json.loads(raw) if raw else {}
+
+
+@functools.cache
+def _managed_storage():
+    st = _wb("GET", "/storage")
+    m = next(i for i in (st if isinstance(st, list) else st.get("items") or []) if i.get("type") == "MANAGED")
+    return m["id"], (m.get("defaultDirectory") or "").strip("/")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _presigned(path, fresh=False):
+    """Short-lived download URL for a file in managed storage (the API key stays on this machine)."""
+    url, t = _signed.get(path, (None, 0))
+    if fresh or not url or time.time() - t > 40:
+        sid, _ = _managed_storage()
+        req = urllib.request.Request(f"{WHEROBOTS_API}/storage/{sid}/files/{urllib.parse.quote(path, safe='')}",
+                                     headers={"X-API-Key": os.environ.get("WHEROBOTS_API_KEY", "")})
+        try:
+            urllib.request.build_opener(_NoRedirect).open(req, timeout=60)
+            raise RuntimeError(f"expected a redirect for {path}")
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303, 307, 308):
+                raise
+            url = e.headers["Location"]
+        _signed[path] = (url, time.time())
+    return url
+
+
+def _tiles_base(folder):
+    return f"pmtiles://http://localhost:{VIEWER_PORT}/tiles/{folder}/"
+
+
+@tool
+def build_pmtiles(rebuild: bool = False) -> str:
+    """Build PMTiles of every building from the user's own Gold tables and serve them to the viewer.
+
+    Only call this when the user asks for PMTiles or vector tiles of their own data. It runs a
+    Wherobots job in the user's organization (about 3 minutes on a Small runtime) that writes
+    sd_points.pmtiles and sd_buildings.pmtiles to their managed storage. The viewer reads them
+    through the local viewer's /tiles/ route. If tiles were already built, they are reused
+    unless rebuild is true.
+
+    Args:
+        rebuild: Build again even if tiles already exist (e.g. after re-running Part 1).
+
+    Returns:
+        JSON with the pmtiles:// base URL for map sources, the files, and the build time.
+    """
+    if MY_TILES.exists() and not rebuild:
+        return json.dumps({**json.loads(MY_TILES.read_text()), "reused": True})
+    folder = time.strftime("%Y%m%d-%H%M%S")
+    sid, default_dir = _managed_storage()
+    script = TILES_JOB.read_text().replace("__OUT_DIR__", f"map-tiles/{folder}")
+    upload = _wb("POST", f"/storage/{sid}/file-upload-url/"
+                 + urllib.parse.quote(f"/{default_dir}/map-tiles/build_pmtiles.py", safe=""))
+    local = MAPS_DIR / ".build_pmtiles.py"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_text(script)
+    # curl sends the clean PUT that presigned S3 URLs need (urllib's default headers break the signature).
+    code = subprocess.run(["curl", "-sS", "-X", "PUT", "-T", str(local), "-w", "%{http_code}", "-o", "/dev/null",
+                           upload["uploadUrl"]], capture_output=True, text=True, timeout=180).stdout.strip()
+    local.unlink()
+    if code != "200":
+        return f"Uploading the tile job failed (HTTP {code})."
+    run = _wb("POST", "/runs", body={"runtime": "small", "name": "map-agent-pmtiles",
+                                     "runPython": {"uri": upload["destination"]}, "timeoutSeconds": 1800},
+              query={"region": WHEROBOTS_REGION})
+    print(f"\n🧱 Building your PMTiles on Wherobots (run {run['id']}, about 3 minutes)…", flush=True)
+    t0, status, last = time.time(), None, None
+    while status not in ("COMPLETED", "FAILED", "CANCELLED"):
+        time.sleep(10)
+        status = _wb("GET", f"/runs/{run['id']}").get("status")
+        if status != last:
+            print(f"   {status.lower()} ({time.time() - t0:.0f}s)", flush=True)
+            last = status
+    if status != "COMPLETED":
+        return (f"The tile job ended {status}. See https://cloud.wherobots.com/jobs/{run['id']} "
+                "for its logs.")
+    result = {"base": _tiles_base(folder), "folder": folder,
+              "files": {"sd_points.pmtiles": "points", "sd_buildings.pmtiles": "buildings"},
+              "storage": f"{os.environ.get('USER_S3_PATH', '<managed storage>/')}map-tiles/{folder}/",
+              "seconds": round(time.time() - t0), "run_id": run["id"]}
+    MY_TILES.write_text(json.dumps(result))
+    return json.dumps(result)
+
+
 # ── System Prompt ──────────────────────────────────────────────
 SYSTEM_PROMPT = f"""You are a geospatial map builder agent. You answer questions about San Diego
 building risk with Wherobots Spatial SQL and publish each answer as an interactive map.
@@ -232,6 +346,12 @@ If unsure of a column, run SELECT * EXCEPT (geometry) ... LIMIT 1 first.
    say the map is updated and what it shows in one or two sentences, and give the permalink
    only at the end for sharing.
 
+PMTiles are an optional path, never the default: keep using write_layer unless the user asks
+for PMTiles, vector tiles or the pre-built tiles. When an answer hits the 10,000-row cap and you
+aggregate, end with one line: "I can also build PMTiles of all your buildings on Wherobots
+(about 3 minutes), so maps like this draw every building instead of hexagons. Just ask." The
+open-mapping skill covers both your own tiles (build_pmtiles) and the workshop's pre-built ones.
+
 For follow-ups ("make it light", "only above 0.3"), reuse the same map_id. Only call
 write_layer again when the data changes; a styling change only needs publish_map.
 Load the open-mapping skill for the spec format and the tier palette.
@@ -257,7 +377,7 @@ def create_agent(wherobots_tools: list) -> Agent:
     return Agent(
         model=get_model(),
         system_prompt=SYSTEM_PROMPT,
-        tools=[write_layer, publish_map] + wherobots_tools,
+        tools=[write_layer, publish_map, build_pmtiles] + wherobots_tools,
         plugins=[skills_plugin],
     )
 
@@ -272,6 +392,32 @@ def start_viewer() -> None:
             # Maps are rewritten in place on every publish; never serve a stale copy.
             self.send_header("Cache-Control", "no-store")
             super().end_headers()
+
+        def do_GET(self):
+            if not self.path.startswith("/tiles/"):
+                return super().do_GET()
+            # /tiles/<folder>/<file>: range reads of the user's PMTiles in managed storage. The
+            # presigned URLs last about a minute, so re-sign as needed instead of handing one out.
+            rel = urllib.parse.unquote(self.path[len("/tiles/"):].split("?")[0])
+            if not _TILE_PATH_RE.match(rel):
+                return self.send_error(404)
+            path = f"/{_managed_storage()[1]}/map-tiles/{rel}"
+            headers = {"Range": self.headers["Range"]} if self.headers.get("Range") else {}
+            for fresh in (False, True):
+                try:
+                    r = urllib.request.urlopen(urllib.request.Request(_presigned(path, fresh), headers=headers), timeout=60)
+                    break
+                except urllib.error.HTTPError as e:
+                    if e.code != 403 or fresh:
+                        return self.send_error(e.code)
+            body = r.read()
+            self.send_response(r.status)
+            for h in ("Content-Type", "Content-Range", "ETag", "Accept-Ranges"):
+                if r.headers.get(h):
+                    self.send_header(h, r.headers[h])
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
     handler = functools.partial(QuietHandler, directory=str(VIEWER_DIR))
     try:
