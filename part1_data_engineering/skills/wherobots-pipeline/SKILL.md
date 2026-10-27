@@ -10,7 +10,7 @@ description: |
 # Wherobots Pipeline Skill
 
 Build geospatial medallion pipelines on Wherobots Cloud. The Wherobots MCP's
-`generate_spatial_query_tool` emits a single SQL query per call — it doesn't
+`submit_read_query` runs a single SQL query per call — it doesn't
 know about notebook structure, medallion layers, or Wherobots idioms. This
 skill tells the agent how to orchestrate MCP calls into notebooks AND when
 to run the workshop's reference pipeline vs generate a custom one.
@@ -33,7 +33,7 @@ three modes from the same chat; infer the mode from the participant's prompt.
 Participant is asking about the catalog, data shape, sample values,
 "what do I have?". Use the Wherobots MCP discovery tools — `list_catalogs`,
 `list_databases`, `list_tables`, `describe_table`, optionally
-`submit_query_tool` for ad-hoc SELECTs. **Do not modify any files.**
+`submit_read_query` for ad-hoc SELECTs. **Do not modify any files.**
 
 The Bronze tables document themselves. `describe_table` returns a table
 comment (what a row is, units, query hints), column comments and
@@ -289,7 +289,7 @@ Non-obvious and not enforced by the MCP:
   the query hints (which classes mean water, which threshold means severe).
 - For rasters: sample `RS_Metadata(raster)` to confirm source CRS and pixel
   scale. Check band distributions via `SELECT DISTINCT band FROM ...`.
-- `generate_spatial_query_tool` and `submit_query_tool` are useful for
+- `search_documentation` and `submit_read_query` are useful for
   ad-hoc exploration SELECTs during discovery; for notebook cells,
   generate SQL directly using the rules in this skill.
 - For every time-varying source, query `MIN`/`MAX` of its date column (and
@@ -323,7 +323,7 @@ reference while notebooks are generated and run.
 Generate `raw-to-bronze.ipynb` (if needed), `bronze-to-silver.ipynb`,
 `silver-to-gold.ipynb` following the layer contracts in medallion-spec.md.
 Write notebook-cell SQL directly — don't round-trip every query through
-`generate_spatial_query_tool`. After each notebook, audit against the
+`submit_read_query`. After each notebook, audit against the
 gotchas table below.
 
 Onboard: every code cell gets a markdown cell above it explaining the
@@ -333,7 +333,7 @@ participant sees the artifact (rules 3, 4, 6).
 
 ### Phase 6 — Verification & Reconciliation
 
-Use `submit_query_tool` to verify every table (`COUNT(*)` + `LIMIT 5`).
+Use `submit_read_query` to verify every table (`COUNT(*)` + `LIMIT 5`).
 If notebook generation drifted from the original design (renamed tables,
 dropped columns), update the docs to match.
 
