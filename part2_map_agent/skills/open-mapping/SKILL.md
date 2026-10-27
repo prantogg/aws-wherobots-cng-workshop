@@ -74,7 +74,7 @@ Sequential ramps for numbers: wildfire `#fee8c8 → #fc8d59 → #b30000`, flood
 
 ## Large answers
 
-The Wherobots MCP returns at most 10,000 rows (`truncated: true` in the summary). Either
+A layer holds at most 30,000 features (`truncated: true` in the summary). Either
 narrow the filter, or aggregate to H3 cells and colour the hexagons by count or mean:
 
 ```sql
@@ -83,6 +83,23 @@ SELECT h3, COUNT(*) AS buildings, AVG(risk_score) AS mean_risk,
 FROM (SELECT explode(ST_H3CellIDs(ST_Centroid(geometry), 8, false)) AS h3, risk_score
       FROM org_catalog.gold.insurance_exposure)
 GROUP BY h3
+```
+
+## Zoom crossfade (hexagons out, buildings in)
+
+When asked for a view that changes with zoom, the zoomed-in layer is always building
+footprints, never hexagons, even when "these buildings" refers to a map that was aggregated:
+
+1. `write_layer` the aggregate layer (H3 hexagons) if the map doesn't have it yet.
+2. `write_layer` a NEW layer of footprints (`geometry` from the Gold table) with the same filter,
+   `ORDER BY risk_score DESC LIMIT 30000`, and say in the answer that it shows the 30,000
+   highest-risk buildings when the filter matches more.
+3. Fade by zoom on opacity: the hexagons' `fill-opacity` goes from full at z11 to 0 at z13;
+   the footprints' `fill-opacity` and `line-opacity` go from 0 at z11 to full at z13.
+   Drop any other hexagon layer from the spec so only footprints remain zoomed in.
+
+```json
+"fill-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0.85, 13, 0]
 ```
 
 ## Follow-ups

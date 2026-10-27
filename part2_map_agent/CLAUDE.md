@@ -19,7 +19,7 @@ User prompt → Strands Agent → Wherobots MCP (SQL on org_catalog.gold)
 ```
 
 1. The agent explores tables and tests SQL with the Wherobots MCP tools when it needs to.
-2. `write_layer(map_id, layer_id, sql)` runs the final query (results capped at 10,000 rows),
+2. `write_layer(map_id, layer_id, sql)` runs the final query (results capped at 30,000 rows),
    saves it as GeoJSON and returns column stats the agent uses for colour stops.
 3. `publish_map(map_id, spec)` validates and writes the map spec, and points
    `maps/current.json` at it. The viewer polls that file and swaps in the new map.
