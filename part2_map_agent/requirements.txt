@@ -5,3 +5,4 @@ geopandas
 shapely
 python-dotenv
 pyarrow
+wherobots-python-dbapi
