@@ -422,7 +422,7 @@ Try this first prompt — it builds a **triage map** of the buildings an underwr
 3. The agent designs the map: colours for each tier, a legend, popups
 4. `publish_map` saves it, and your browser tab updates
 
-**What you'll see:** there are **205,454** high and critical buildings in the county (154,090 high, 51,364 critical). That's more than the agent draws one by one (it works within 10,000 features per layer), so it will usually group them into small hexagons coloured by their dominant tier, and tell you it did. The pattern is the point: the risk rakes across the **eastern backcountry** (Poway, Ramona, Julian), the wildland-urban interface, *not* the coast. Wildfire is the escalator that pushes a building into the critical tier.
+**What you'll see:** there are **205,454** high and critical buildings in the county (154,090 high, 51,364 critical). That's more than the agent draws one by one (it works within 30,000 features per layer), so it will usually group them into small hexagons coloured by their dominant tier, and tell you it did. The pattern is the point: the risk rakes across the **eastern backcountry** (Poway, Ramona, Julian), the wildland-urban interface, *not* the coast. Wildfire is the escalator that pushes a building into the critical tier.
 
 > **Tip:** Ask a follow-up: *"add a popup showing the building count and average risk score for each hexagon."* Follow-ups on the same map keep your current zoom and position.
 
@@ -436,7 +436,7 @@ Stay in the same agent session and add more layers. A single follow-up turns the
 
 **What the agent does:**
 1. `write_layer` → fine H3 hexagons with the average `risk_score` of the buildings inside each
-2. `write_layer` → a building layer for the zoomed-in view (within the 10,000-feature limit, so the agent picks the most relevant buildings, such as the critical tier, and says so)
+2. `write_layer` → a building layer for the zoomed-in view (within the 30,000-feature limit, so the agent picks the most relevant buildings, such as the critical tier, and says so)
 3. `publish_map` → MapLibre zoom expressions on the layers' opacity: the hexagons fade out and the buildings fade in as you zoom
 
 **What you'll see:** zoomed out, the county glows with **average-risk hotspots**. Zoom in past about z12 and the hexagons dissolve into the actual buildings, tier-coloured and clickable. Same data, two reading altitudes, entirely driven by style.
@@ -539,7 +539,7 @@ In production, you'd use both: pipelines to keep data fresh, agents to let anyon
 | First answer takes minutes | Wherobots is starting compute for your queries. It stays warm while you keep asking; after about 5 idle minutes the next question starts it again. |
 | Map tab stays on *No map yet* | The agent hasn't published a map yet (watch the terminal), or the tab is an old copy: reload `http://localhost:8765` with Cmd+Shift+R. |
 | `Port 8765 is busy` | Another agent or server is using it. Quit it, or set `MAP_VIEWER_PORT=8766` in `.env` and open that port instead. |
-| Agent says the answer was capped at 10,000 | That's the per-layer limit. Narrow the question (an area, a tier) or ask for hexagons instead of buildings. |
+| Agent says the answer was capped at 30,000 | That's the per-layer limit. Narrow the question (an area, a tier) or ask for hexagons instead of buildings. |
 | Agent can't find a table or column | Part 1's silver-to-gold hasn't finished, or wrote to a different database. Check with the Wherobots MCP that `org_catalog.gold` has the four tables. |
 | Agent generates wrong SQL | Schema is in the system prompt — check `agent.py` for table definitions |
 | `ModuleNotFoundError` | Activate virtualenv: `source .venv/bin/activate` |

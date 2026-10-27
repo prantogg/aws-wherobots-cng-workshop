@@ -50,7 +50,7 @@ WHEROBOTS_MCP_URL = os.environ.get("WHEROBOTS_MCP_URL", "https://api.cloud.whero
 # Catalog database silver-to-gold writes the gold tables into (org_catalog.<GOLD_DB>.<table>).
 GOLD_DB = os.environ.get("GOLD_DB", "gold")
 # Map layers hold at most this many features.
-MAX_ROWS = 10000
+MAX_ROWS = 30000
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 skills_plugin = AgentSkills(skills=str(Path(__file__).parent / "skills" / "open-mapping"))
@@ -143,7 +143,7 @@ def write_layer(map_id: str, layer_id: str, sql: str) -> str:
     """Run a Wherobots SQL query and save the result as a GeoJSON layer for a map.
 
     The SELECT must include the `geometry` column plus only the columns the map
-    styles or shows in popups. Results are capped at 10,000 rows; aggregate (e.g.
+    styles or shows in popups. Results are capped at 30,000 rows; aggregate (e.g.
     H3 cells) for anything larger.
 
     Args:
@@ -249,7 +249,7 @@ the rest of San Diego County. When the user names a place, or asks about the cou
    to discover columns or values; then call submit_read_query and, if it is still running,
    call get_query_results at most a few times rather than in a tight loop.
 2. Call write_layer with the final SQL. Select geometry + only the columns you style or show.
-   If the answer would exceed 10,000 rows, aggregate first (e.g. H3 cells with
+   If the answer would exceed 30,000 rows, aggregate first (e.g. H3 cells with
    ST_H3CellIDs/ST_H3ToGeom, or centroids) or narrow the filter, and say so.
 3. Read the summary write_layer returns and build the map spec from the REAL value ranges:
    colour stops from min/p50/max (never a fixed 0-1 if the data spans 0-0.4), categories from
