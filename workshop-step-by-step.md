@@ -392,7 +392,7 @@ The agent has two kinds of tools:
 
 | Tool | Purpose |
 |----------|---------|
-| Wherobots MCP (`describe_table_tool`, `submit_query_tool`, …) | Explore tables and test queries when the agent needs to |
+| Wherobots MCP (`describe_table`, `submit_read_query`, …) | Explore tables and test queries when the agent needs to |
 | `write_layer` | Run the final query and save the result as a map layer, returning value ranges and categories so the agent can pick sensible colours |
 | `publish_map` | Save the map description (layers, colours, legend, popups) and update the viewer |
 

@@ -7,16 +7,16 @@
         "x-api-key": "${WHEROBOTS_API_KEY}"
       },
       "autoApprove": [
-        "list_catalogs_tool",
-        "list_databases_tool",
-        "list_tables_tool",
-        "describe_table_tool",
-        "search_documentation_tool",
-        "generate_spatial_query_tool",
-        "submit_query_tool",
-        "get_query_status_tool",
-        "get_query_results_tool",
-        "cancel_query_tool"
+        "list_catalogs",
+        "list_databases",
+        "list_tables",
+        "describe_table",
+        "search_documentation",
+        "submit_read_query",
+        "get_query_results",
+        "cancel_query",
+        "list_runtimes",
+        "get_runtime"
       ]
     }
   }

@@ -17,14 +17,12 @@ Usage:
 """
 
 import functools
-import io
 import json
 import os
 import re
 import sys
 import threading
 import time
-import urllib.request
 import uuid
 from datetime import timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -34,13 +32,15 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 import geopandas as gpd
-import pyarrow.parquet as pq
+import pandas as pd
 import shapely
 import httpx2
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 from strands import Agent, AgentSkills, tool
 from strands.tools.mcp import MCPClient
 from strands.types.exceptions import MCPClientInitializationError
+from wherobots.db import connect as connect_wherobots_sql
+from wherobots.db.types import GeometryRepresentation, ResultsFormat
 
 # ── Constants ──────────────────────────────────────────────────
 VIEWER_DIR = Path(__file__).parent / "viewer"
@@ -49,7 +49,7 @@ VIEWER_PORT = int(os.environ.get("MAP_VIEWER_PORT", "8765"))
 WHEROBOTS_MCP_URL = os.environ.get("WHEROBOTS_MCP_URL", "https://api.cloud.wherobots.com/mcp")
 # Catalog database silver-to-gold writes the gold tables into (org_catalog.<GOLD_DB>.<table>).
 GOLD_DB = os.environ.get("GOLD_DB", "gold")
-# The Wherobots MCP returns at most this many rows per query.
+# Map layers hold at most this many features.
 MAX_ROWS = 10000
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -83,18 +83,33 @@ def _mcp(name: str, arguments: dict) -> dict:
     return payload.get("result", payload) if "status" not in payload else payload
 
 
-def _run_query_to_parquet(sql: str) -> bytes:
-    """Run SQL through the Wherobots MCP with store_results and download the Parquet result."""
-    job = _mcp("submit_query_tool", {"query": sql, "store_results": True, "limit": MAX_ROWS, "wait_seconds": 50})
-    while job.get("status") in ("pending", "starting_session", "running"):
-        time.sleep(10)
-        job = _mcp("get_query_status_tool", {"query_id": job["query_id"]})
-    if job.get("status") != "succeeded":
-        raise RuntimeError(f"query {job.get('status')}: {job.get('error_message')}")
-    if not job.get("result_uri"):
-        job = _mcp("get_query_results_tool", {"query_id": job["query_id"]})
-    with urllib.request.urlopen(job["result_uri"], timeout=120) as resp:
-        return resp.read()
+# ── Wherobots SQL client ───────────────────────────────────────
+# The MCP returns agent-sized answers (about 16 KB per call), so map layers come through the
+# Wherobots SQL client instead, which returns a whole result in one transfer.
+
+_sql_lock = threading.Lock()
+_sql_conn = None
+
+
+def _run_sql(sql: str) -> pd.DataFrame:
+    """Run SQL in a Wherobots SQL session and return every row (geometry as WKB)."""
+    global _sql_conn
+    with _sql_lock:
+        try:
+            if _sql_conn is None:
+                _sql_conn = connect_wherobots_sql(
+                    api_key=os.environ.get("WHEROBOTS_API_KEY", ""),
+                    runtime=os.environ.get("WHEROBOTS_RUNTIME_ID") or None,
+                    results_format=ResultsFormat.ARROW,
+                    geometry_representation=GeometryRepresentation.WKB,
+                )
+            cursor = _sql_conn.cursor()
+            cursor.execute(sql)
+            return cursor.fetchall()
+        except Exception:
+            # A failed query or an ended session: start from a fresh connection next time.
+            _sql_conn = None
+            raise
 
 
 def _summarize(gdf: gpd.GeoDataFrame) -> dict:
@@ -143,7 +158,7 @@ def write_layer(map_id: str, layer_id: str, sql: str) -> str:
     """
     if not (_ID_RE.match(map_id) and _ID_RE.match(layer_id)):
         return "map_id and layer_id must be lowercase letters, digits, '-' or '_'."
-    table = pq.read_table(io.BytesIO(_run_query_to_parquet(sql))).to_pandas()
+    table = _run_sql(f"SELECT * FROM ({sql}) LIMIT {MAX_ROWS}")
     if "geometry" not in table.columns:
         return "The query result has no `geometry` column; include it in the SELECT."
     # geometry_bbox is a bounding-box column Wherobots adds to query results; maps don't need it.
@@ -220,8 +235,8 @@ If unsure of a column, run SELECT * EXCEPT (geometry) ... LIMIT 1 first.
 
 1. When the filter is clear, go straight to write_layer: it waits for the query itself and
    reports the row count and truncation. Only use the Wherobots MCP tools first when you need
-   to discover columns or values; then call submit_query_tool with wait_seconds=55 and, if it
-   is still running, call get_query_status_tool at most a few times rather than in a tight loop.
+   to discover columns or values; then call submit_read_query and, if it is still running,
+   call get_query_results at most a few times rather than in a tight loop.
 2. Call write_layer with the final SQL. Select geometry + only the columns you style or show.
    If the answer would exceed 10,000 rows, aggregate first (e.g. H3 cells with
    ST_H3CellIDs/ST_H3ToGeom, or centroids) or narrow the filter, and say so.
@@ -312,8 +327,9 @@ def main():
         with wherobots_mcp:
             wherobots_tools = wherobots_mcp.list_tools_sync()
             print(f"✅ Wherobots MCP connected ({len(wherobots_tools)} tools available)")
-            # Start the SQL session now so its cold start overlaps with the user typing.
-            _mcp("submit_query_tool", {"query": "SELECT 1", "wait_seconds": 1})
+            # Start both SQL sessions (the MCP's and the map layers') while the user types.
+            _mcp("submit_read_query", {"query": "SELECT 1", "description": "Start the SQL session"})
+            threading.Thread(target=_run_sql, args=("SELECT 1",), daemon=True).start()
             print("⏳ Compute is warming up; the first answer may still take a minute or two.\n")
             agent = create_agent(wherobots_tools)
 
