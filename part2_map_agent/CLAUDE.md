@@ -28,7 +28,7 @@ User prompt → Strands Agent → Wherobots MCP (SQL on org_catalog.gold)
 
 ## Data (Gold Iceberg tables from Part 1)
 
-4 Gold tables in `org_catalog.gold`, ~1M San Diego County buildings each:
+4 Gold tables in `org_catalog.gold`, 357,263 City of San Diego buildings each (the Part 1 reference area):
 - `insurance_exposure` — risk_tier, wildfire/flood/weather factors, triage_priority
 - `cre_risk` — risk_tier, acquisition_screen_flag, exposure_magnitude_index
 - `capital_markets_signals` — disruption_signal, supply_chain_vulnerability (no risk_tier)

@@ -44,7 +44,7 @@ Developer in Claude Code / Kiro         Strands Agent (Bedrock Claude)
  Bronze → Silver → Gold ─────────┐      ┌───────────────────────┐
                                  │      │ MapLibre viewer       │
           org_catalog.gold       │      │ localhost:8765        │
-          Iceberg, ~1M × 4  ◀────┘      │ updates after answers │
+          Iceberg, 357K × 4 ◀────┘      │ updates after answers │
                                         └───────────────────────┘
 ```
 
