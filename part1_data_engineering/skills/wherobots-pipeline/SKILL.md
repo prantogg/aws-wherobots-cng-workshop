@@ -84,7 +84,7 @@ run the notebooks on the participant's behalf.
 
 | Notebook | Runtime | Why |
 |---|---|---|
-| `bronze-to-silver.ipynb` | **Medium** | Raster zonal stats + spatial KNN + cached-buildings shuffle. The reference AOI is the City of San Diego (~357K buildings): about 13 min on Medium, 12.5 on Large. The county (~1.03M buildings) needs **Large**: about 35 min from session start (source loads and wildfire zonal stats 9 min, the 18-week flood loop 10 min, the storm-cell KNN 13 min). |
+| `bronze-to-silver.ipynb` | **Small** | Raster zonal stats + spatial KNN + cached-buildings shuffle. The reference AOI is the City of San Diego (~357K buildings): about 27 min on Small, which every Professional org (including trials) can start; about 13 min on Medium where the org allows it. The county (~1.03M buildings) needs **Large**: about 35 min from session start (source loads and wildfire zonal stats 9 min, the 18-week flood loop 10 min, the storm-cell KNN 13 min). |
 | `silver-to-gold.ipynb` | **Small** | SQL-only on pre-joined Silver tables — no spatial joins or raster ops. About 3 minutes on Small for the city AOI (6.5 on Tiny), about 6 minutes for the county. |
 
 **Reporting Gold completion — one row per industry, same shape.**
@@ -140,7 +140,7 @@ bootstrap"**. Use it as an onboarding moment:
      — USFS CONUS wildfire burn probability + flame length rasters
 3. Offer to run the bootstrap:
    > *"I can kick off `python3 scripts/run_bootstrap.py` to load all
-   > seven bronze tables (~8 min on Tiny, including their documentation; I run it once and poll), or I can keep explaining
+   > seven bronze tables (~6 min on Small, including their documentation; I run it once and poll), or I can keep explaining
    > what each dataset contains first. Which do you prefer?"*
 4. If they choose to bootstrap: run it, stream progress. If they want
    to learn first: describe each dataset's row semantics, typical use

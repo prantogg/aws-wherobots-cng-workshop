@@ -46,7 +46,7 @@ LOCAL_BOOTSTRAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 UPLOAD_SUBPATH = "scripts/bootstrap.py"  # relative to the managed storage default dir
 
 RUN_NAME = "workshop-bootstrap"
-RUNTIME = "tiny"
+RUNTIME = "small"
 TIMEOUT_SEC = 1800
 
 POLL_INTERVAL_SEC = 4

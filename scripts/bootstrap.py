@@ -24,7 +24,7 @@ Submit as a Wherobots job run:
       -H "X-API-Key: $WHEROBOTS_API_KEY" \\
       -H 'Content-Type: application/json' \\
       -d '{
-        "runtime": "tiny",
+        "runtime": "small",
         "name": "workshop-bootstrap",
         "runPython": {
           "uri": "s3://wherobots-examples/aws-felt-wherobots-workshop/scripts/bootstrap.py"
@@ -32,7 +32,7 @@ Submit as a Wherobots job run:
         "timeoutSeconds": 1800
       }'
 
-Expected wall clock: ~3.5 min on Tiny runtime. Idempotent — re-running replaces
+Expected wall clock: ~6 min on Small runtime. Idempotent — re-running replaces
 the tables (no append semantics, no duplicate rows).
 """
 
